@@ -76,6 +76,11 @@ fn add_progress(manager: &DownloadManager, id: &str, amount: u64) {
         if let Some(record) = records.get(id) { record.downloaded.fetch_add(amount, Ordering::Relaxed); }
     }
 }
+fn reset_progress(manager: &DownloadManager, id: &str) {
+    if let Ok(records) = manager.records.lock() {
+        if let Some(record) = records.get(id) { record.downloaded.store(0, Ordering::Relaxed); }
+    }
+}
 
 #[tauri::command]
 async fn start_download(
@@ -89,9 +94,15 @@ async fn start_download(
         "auto" | "file" | "audio" | "video" | "video-only" => kind,
         _ => "auto".to_string(),
     };
+    let mobile_default = app.path().app_data_dir().ok().map(|path| path.join("Downloads"));
+    let default_destination = if cfg!(any(target_os = "android", target_os = "ios")) {
+        mobile_default.or_else(|| dirs::document_dir()).unwrap_or_else(std::env::temp_dir)
+    } else {
+        dirs::download_dir().or_else(|| dirs::document_dir()).unwrap_or_else(std::env::temp_dir)
+    };
     let destination_path = match destination {
         Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
-        _ => dirs::download_dir().or_else(|| dirs::document_dir()).unwrap_or_else(std::env::temp_dir),
+        _ => default_destination,
     };
     let id = Uuid::new_v4().simple().to_string();
     let cancel = CancellationToken::new();
@@ -179,6 +190,11 @@ async fn execute_download(
     let client = Client::builder().user_agent("DownBest/1.0 (+https://github.com/nazim-assdi/DownBest)")
         .connect_timeout(std::time::Duration::from_secs(20))
         .pool_idle_timeout(std::time::Duration::from_secs(90)).pool_max_idle_per_host(32)
+        .default_headers({
+            let mut headers = header::HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("identity"));
+            headers
+        })
         .build().map_err(|e| format!("Could not initialize network client: {e}"))?;
     set_status(&manager, &id, "Downloading", None);
     download_http(&client, &url, &target, &destination, &id, concurrency, &manager, &cancel).await
@@ -186,9 +202,16 @@ async fn execute_download(
 
 fn needs_media_extractor(url: &Url) -> bool {
     let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    let known = ["youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com",
+    // yt-dlp supports a broad and frequently updated extractor catalogue.
+    // This fast-path list identifies common media sites without a format probe.
+    let known = [
+        "youtube.com", "youtu.be", "youtube-nocookie.com", "vimeo.com",
         "dailymotion.com", "tiktok.com", "instagram.com", "facebook.com", "fb.watch",
-        "twitter.com", "x.com", "soundcloud.com", "twitch.tv"];
+        "twitter.com", "x.com", "soundcloud.com", "twitch.tv", "reddit.com", "redd.it",
+        "streamable.com", "loom.com", "bilibili.com", "b23.tv", "ok.ru", "rutube.ru",
+        "bandcamp.com", "mixcloud.com", "rumble.com", "odysee.com", "pinterest.com",
+        "pinterest.co.uk", "archive.org", "kick.com", "vk.com", "snapchat.com",
+    ];
     if known.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}"))) { return true; }
     let path = url.path().to_ascii_lowercase();
     path.ends_with(".m3u8") || path.ends_with(".mpd")
@@ -233,7 +256,21 @@ async fn download_http(
         let count = concurrency.min(((total / (2 * 1024 * 1024)).max(1)) as usize).min(32);
         if total >= 4 * 1024 * 1024 && count > 1 {
             drop(probe);
-            download_segmented(client, url, target, destination, id, total, count, manager, cancel).await
+            match download_segmented(client, url, target, destination, id, total, count, manager, cancel).await {
+                Ok(()) => Ok(()),
+                Err(error) if error == "Cancelled" => Err(error),
+                Err(_range_error) => {
+                    // Some origins advertise byte ranges but reject parallel requests.
+                    // Retry once with a normal single connection instead of failing the item.
+                    reset_progress(manager, id);
+                    let response = client.get(url).send().await
+                        .map_err(|e| format!("Parallel download failed and fallback connection failed: {e}"))?;
+                    if !response.status().is_success() {
+                        return Err(format!("Parallel download failed and fallback returned HTTP {}", response.status()));
+                    }
+                    stream_to_target(response, target, id, manager, cancel).await
+                }
+            }
         } else {
             drop(probe);
             let response = client.get(url).send().await.map_err(|e| format!("Download request failed: {e}"))?;
@@ -378,16 +415,19 @@ async fn run_media_download(
         }
         _ => { command.arg("-f").arg("best[ext=mp4]/best"); }
     }
-    command.arg(url.as_str()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     if let Some(aria_path) = aria2 {
+        // aria2c handles HTTP/FTP media transfers; yt-dlp's native downloader
+        // handles DASH/HLS fragments so fragment scheduling remains protocol-aware.
         command.arg("--downloader").arg("aria2c")
-            .arg("--downloader-args").arg("aria2c:-x 16 -s 16 -k 1M");
+            .arg("--downloader").arg("dash,m3u8:native")
+            .arg("--downloader-args").arg("aria2c:-c -x 16 -s 16 -k 1M");
         if let Some(parent) = aria_path.parent() {
             let mut paths = vec![parent.to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
             if let Ok(joined) = std::env::join_paths(paths) { command.env("PATH", joined); }
         }
     }
+    command.arg(url.as_str()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("Could not start yt-dlp: {e}"))?;
     let stdout = child.stdout.take().ok_or_else(|| "Could not read yt-dlp output.".to_string())?;
     let stderr = child.stderr.take();
