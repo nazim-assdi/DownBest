@@ -74,9 +74,9 @@ The native Rust direct-file downloader does not require these tools. Do not down
 
 The workflow runs on pushes to `main` and can also be started manually. It generates the platform icons and builds:
 
-- Windows installer (.exe via NSIS)
+- Windows EXE (NSIS) and MSI
 - macOS DMG for Apple Silicon and Intel
-- Linux AppImage and DEB
+- Linux AppImage, DEB and RPM
 - Android APKs split by ABI
 
 The iOS job is disabled until Apple signing secrets are configured and the repository variable `ENABLE_SIGNED_IOS_BUILD=true` is set. Add these repository secrets:
