@@ -578,8 +578,11 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .manage(DownloadManager::default())
+    let builder = tauri::Builder::default()
+        .manage(DownloadManager::default());
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_media::init());
+    builder
         .invoke_handler(tauri::generate_handler![
             start_download, get_downloads, cancel_download, clear_finished, check_engines
         ])
