@@ -51,11 +51,13 @@ Build a desktop release:
 Android (configured Android SDK/NDK and Java 17):
 
     npm run tauri android init
+    npm run tauri icon app-icon.svg
     npm run tauri android build -- --apk
 
 iOS (macOS + Xcode + Apple Developer signing configured):
 
     npm run tauri ios init
+    npm run tauri icon app-icon.svg
     npm run tauri ios build -- --export-method app-store-connect
 
 ## Optional desktop media tools
