@@ -36,6 +36,7 @@ struct DownloadRecord {
     id: String, url: String, file_name: String, kind: String, status: String,
     destination: String, downloaded: Arc<AtomicU64>, total: Option<u64>,
     started: Instant, error: Option<String>, cancel: CancellationToken,
+    progress_override: Option<f64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -49,8 +50,9 @@ struct ToolStatus { name: String, available: bool, version: Option<String> }
 
 fn view_of(record: &DownloadRecord) -> DownloadView {
     let downloaded = record.downloaded.load(Ordering::Relaxed);
-    let progress = record.total.filter(|n| *n > 0)
+    let calculated = record.total.filter(|n| *n > 0)
         .map(|n| (downloaded as f64 / n as f64 * 100.0).clamp(0.0, 100.0)).unwrap_or(0.0);
+    let progress = record.progress_override.unwrap_or(calculated);
     let elapsed = record.started.elapsed().as_secs_f64().max(0.5);
     DownloadView {
         id: record.id.clone(), url: record.url.clone(), file_name: record.file_name.clone(),
@@ -64,6 +66,9 @@ fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<S
         if let Some(record) = records.get_mut(id) {
             if matches!(status, "Downloading" | "Extracting media") {
                 record.started = Instant::now();
+            }
+            if status == "Completed" {
+                record.progress_override = Some(100.0);
             }
             record.status = status.to_string();
             record.error = error;
@@ -90,6 +95,14 @@ fn reset_progress(manager: &DownloadManager, id: &str) {
         if let Some(record) = records.get(id) { record.downloaded.store(0, Ordering::Relaxed); }
     }
 }
+fn set_progress(manager: &DownloadManager, id: &str, progress: f64) {
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            record.progress_override = Some(progress.clamp(0.0, 100.0));
+        }
+    }
+}
+
 
 #[tauri::command]
 async fn start_download(
@@ -120,7 +133,7 @@ async fn start_download(
         file_name: suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8])),
         kind: kind.clone(), status: "Queued".into(), destination: destination_path.display().to_string(),
         downloaded: Arc::new(AtomicU64::new(0)), total: None, started: Instant::now(),
-        error: None, cancel: cancel.clone(),
+        error: None, cancel: cancel.clone(), progress_override: None,
     };
     let initial = view_of(&record);
     let manager = manager.inner().clone();
@@ -437,13 +450,7 @@ async fn run_media_download(
     let progress_manager = manager.clone();
     let progress_id = id.to_string();
     let on_progress = tauri::ipc::Channel::new(move |progress: MediaProgress| {
-        if let Ok(records) = progress_manager.records.lock() {
-            if let Some(record) = records.get(&progress_id) {
-                let percent = progress.progress.clamp(0.0, 100.0);
-                record.downloaded.store(percent.round() as u64, Ordering::Relaxed);
-                record.total = Some(100);
-            }
-        }
+        set_progress(&progress_manager, &progress_id, progress.progress);
         Ok(())
     });
     let request = MediaDownloadRequest {
@@ -467,13 +474,13 @@ async fn run_media_download(
 
 #[cfg(target_os = "ios")]
 async fn run_media_download(
-    _app: &AppHandle, _manager: &DownloadManager, _id: &str, url: &Url, _kind: &str,
-    _destination: &Path, _concurrency: usize, _cancel: &CancellationToken,
+    _app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, _kind: &str,
+    destination: &Path, _concurrency: usize, cancel: &CancellationToken,
 ) -> Result<(), String> {
     if url.path().to_ascii_lowercase().ends_with(".m3u8") {
-        return Err("Open HLS manifest support is being added through the native Rust HLS engine. Encrypted HLS and DRM streams are not supported.".into());
+        return download_open_hls(url, destination, id, manager, cancel).await;
     }
-    Err("This iOS build supports direct HTTP/HTTPS files. Generic third-party site extraction is not available in the App Store build unless the source explicitly authorizes downloading.".into())
+    Err("This iOS build supports direct HTTP/HTTPS files and open HLS playlists. Generic third-party site extraction is not enabled in the App Store build; use a desktop build for supported yt-dlp extractors where you have download permission.".into())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -547,6 +554,118 @@ async fn run_media_download(
         let tail: String = stderr_text.chars().rev().take(900).collect::<String>().chars().rev().collect();
         Err(if tail.trim().is_empty() { format!("yt-dlp exited with status {status}.") } else { format!("yt-dlp: {tail}") })
     }
+}
+
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+async fn download_open_hls(
+    source: &Url,
+    destination: &Path,
+    id: &str,
+    manager: &DownloadManager,
+    cancel: &CancellationToken,
+) -> Result<(), String> {
+    use m3u8_rs::{KeyMethod, Playlist};
+
+    async fn playlist(
+        client: &Client,
+        url: &Url,
+        cancel: &CancellationToken,
+    ) -> Result<Playlist, String> {
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err("Cancelled".into()),
+            result = client.get(url.clone()).send() => result.map_err(|e| format!("HLS playlist request failed: {e}"))?,
+        };
+        if !response.status().is_success() {
+            return Err(format!("HLS server returned HTTP {}", response.status()));
+        }
+        let body = response.bytes().await.map_err(|e| format!("Could not read HLS playlist: {e}"))?;
+        m3u8_rs::parse_playlist_res(&body)
+            .map_err(|e| format!("Invalid HLS playlist: {e}"))
+    }
+
+    let client = Client::builder()
+        .user_agent("DownBest/1.0")
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("Could not initialize HLS client: {e}"))?;
+
+    let root = playlist(&client, source, cancel).await?;
+    let (media_url, media) = match root {
+        Playlist::MediaPlaylist(media) => (source.clone(), media),
+        Playlist::MasterPlaylist(master) => {
+            let variant = master.variants.iter()
+                .filter(|variant| !variant.is_i_frame && variant.audio.is_none())
+                .max_by_key(|variant| variant.bandwidth)
+                .ok_or_else(|| "This HLS master playlist uses a separate audio rendition or has no compatible video variant. Use a desktop build for muxed HLS/DASH extraction.".to_string())?;
+            let child_url = source.join(&variant.uri)
+                .map_err(|e| format!("Invalid HLS variant URL: {e}"))?;
+            match playlist(&client, &child_url, cancel).await? {
+                Playlist::MediaPlaylist(media) => (child_url, media),
+                Playlist::MasterPlaylist(_) => return Err("Nested HLS master playlists are not supported on iOS.".into()),
+            }
+        }
+    };
+
+    if !media.end_list {
+        return Err("Live HLS playlists are not supported by the mobile HLS saver. Use a completed VOD playlist.".into());
+    }
+    if media.segments.is_empty() {
+        return Err("The HLS playlist contains no media segments.".into());
+    }
+    if media.segments.iter().any(|segment| {
+        segment.key.as_ref().map(|key| key.method != KeyMethod::None).unwrap_or(false)
+    }) {
+        return Err("This HLS stream is encrypted. DownBest does not decrypt DRM or encrypted media.".into());
+    }
+    if media.segments.iter().any(|segment| segment.byte_range.is_some()) {
+        return Err("HLS byte-range segments are not supported by the mobile saver yet.".into());
+    }
+
+    let map_uri = media.segments.iter().find_map(|segment| segment.map.as_ref().map(|map| map.uri.clone()));
+    if media.segments.iter().filter_map(|segment| segment.map.as_ref()).any(|map| Some(&map.uri) != map_uri.as_ref()) {
+        return Err("The HLS playlist changes its initialization segment. Use a desktop build for this stream.".into());
+    }
+    let extension = if map_uri.is_some() { "mp4" } else { "ts" };
+    let base_name = suggested_name(source).unwrap_or_else(|| format!("hls-{}", &id[..8]));
+    let stem = Path::new(&base_name).file_stem().and_then(|v| v.to_str()).unwrap_or("hls");
+    let target = unique_path(destination, &format!("{stem}.{extension}"));
+    set_file_name(manager, id, target.file_name().and_then(|v| v.to_str()).unwrap_or("stream.ts"));
+
+    let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
+    let mut output = File::create(&temp).await.map_err(|e| format!("Cannot create HLS output: {e}"))?;
+
+    if let Some(uri) = map_uri {
+        let map_url = media_url.join(&uri).map_err(|e| format!("Invalid HLS init segment URL: {e}"))?;
+        let response = client.get(map_url).send().await.map_err(|e| format!("HLS init segment request failed: {e}"))?;
+        if !response.status().is_success() { return Err(format!("HLS init segment returned HTTP {}", response.status())); }
+        let bytes = response.bytes().await.map_err(|e| format!("Could not read HLS init segment: {e}"))?;
+        output.write_all(&bytes).await.map_err(|e| format!("Could not write HLS init segment: {e}"))?;
+        add_progress(manager, id, bytes.len() as u64);
+    }
+
+    let total_segments = media.segments.len();
+    for (index, segment) in media.segments.iter().enumerate() {
+        if cancel.is_cancelled() { return Err("Cancelled".into()); }
+        let segment_url = media_url.join(&segment.uri)
+            .map_err(|e| format!("Invalid HLS segment URL: {e}"))?;
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err("Cancelled".into()),
+            result = client.get(segment_url).send() => result.map_err(|e| format!("HLS segment request failed: {e}"))?,
+        };
+        if !response.status().is_success() {
+            return Err(format!("HLS segment {} returned HTTP {}", index + 1, response.status()));
+        }
+        let bytes = response.bytes().await.map_err(|e| format!("Could not read HLS segment {}: {e}", index + 1))?;
+        output.write_all(&bytes).await.map_err(|e| format!("Could not write HLS segment {}: {e}", index + 1))?;
+        add_progress(manager, id, bytes.len() as u64);
+        set_progress(manager, id, ((index + 1) as f64 / total_segments as f64) * 100.0);
+    }
+    output.flush().await.map_err(|e| format!("Could not flush HLS output: {e}"))?;
+    output.sync_all().await.map_err(|e| format!("Could not sync HLS output: {e}"))?;
+    drop(output);
+    fs::rename(&temp, &target).await.map_err(|e| format!("Could not finalize HLS output: {e}"))?;
+    Ok(())
 }
 
 fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
