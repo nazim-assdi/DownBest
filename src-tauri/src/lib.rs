@@ -18,6 +18,8 @@ use tokio::{io::{AsyncBufReadExt, AsyncReadExt, BufReader}, process::Command};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use tauri_plugin_media::{MediaDownloadRequest, MediaExt, MediaProgress};
 
 #[derive(Clone)]
 struct DownloadManager {
@@ -426,12 +428,52 @@ async fn download_piece(
     Ok(())
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 async fn run_media_download(
-    _app: &AppHandle, _manager: &DownloadManager, _id: &str, _url: &Url, _kind: &str,
+    app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
+    destination: &Path, concurrency: usize, cancel: &CancellationToken,
+) -> Result<(), String> {
+    if cancel.is_cancelled() { return Err("Cancelled".into()); }
+    let progress_manager = manager.clone();
+    let progress_id = id.to_string();
+    let on_progress = tauri::ipc::Channel::new(move |progress: MediaProgress| {
+        if let Ok(records) = progress_manager.records.lock() {
+            if let Some(record) = records.get(&progress_id) {
+                let percent = progress.progress.clamp(0.0, 100.0);
+                record.downloaded.store(percent.round() as u64, Ordering::Relaxed);
+                record.total = Some(100);
+            }
+        }
+        Ok(())
+    });
+    let request = MediaDownloadRequest {
+        url: url.as_str().to_string(),
+        destination: destination.display().to_string(),
+        kind: kind.to_string(),
+        concurrency: concurrency.min(16),
+        on_progress,
+    };
+    let app_handle = app.clone();
+    let result = tokio::task::spawn_blocking(move || app_handle.media().download(request))
+        .await.map_err(|e| format!("Mobile media worker failed: {e}"))?
+        .map_err(|e| format!("Mobile media engine: {e}"))?;
+    set_file_name(manager, id, &result.file_name);
+    if cancel.is_cancelled() { return Err("Cancelled".into()); }
+    if !Path::new(&result.file_path).is_file() {
+        return Err("The Android extractor reported success but the output file is missing.".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "ios")]
+async fn run_media_download(
+    _app: &AppHandle, _manager: &DownloadManager, _id: &str, url: &Url, _kind: &str,
     _destination: &Path, _concurrency: usize, _cancel: &CancellationToken,
 ) -> Result<(), String> {
-    Err("Media-site extraction (YouTube and similar) needs yt-dlp and is currently desktop-only. Direct HTTP/HTTPS file links work on mobile.".into())
+    if url.path().to_ascii_lowercase().ends_with(".m3u8") {
+        return Err("Open HLS manifest support is being added through the native Rust HLS engine. Encrypted HLS and DRM streams are not supported.".into());
+    }
+    Err("This iOS build supports direct HTTP/HTTPS files. Generic third-party site extraction is not available in the App Store build unless the source explicitly authorizes downloading.".into())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
