@@ -120,5 +120,5 @@ document.querySelector("#clear")!.addEventListener("click", async () => {
   try { await invoke("clear_finished"); await refreshDownloads(); toast("Finished items cleared."); }
   catch (e) { toast(String(e), true); }
 });
-await Promise.all([refreshDownloads(), refreshTools()]);
-window.setInterval(refreshDownloads, 1000);
+void Promise.all([refreshDownloads(), refreshTools()]);
+window.setInterval(() => { void refreshDownloads(); }, 1000);
