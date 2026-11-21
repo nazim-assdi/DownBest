@@ -180,13 +180,6 @@ async fn execute_download(
     fs::create_dir_all(&destination).await.map_err(|e| format!("Cannot create save folder: {e}"))?;
     set_status(&manager, &id, "Connecting", None);
     let parsed = Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
-    if needs_media_extractor(&parsed) {
-        set_status(&manager, &id, "Extracting media", None);
-        return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, &cancel).await;
-    }
-    let name = suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8]));
-    let target = unique_path(&destination, &name);
-    set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     let client = Client::builder().user_agent("DownBest/1.0 (+https://github.com/nazim-assdi/DownBest)")
         .connect_timeout(std::time::Duration::from_secs(20))
         .pool_idle_timeout(std::time::Duration::from_secs(90)).pool_max_idle_per_host(32)
@@ -196,8 +189,44 @@ async fn execute_download(
             headers
         })
         .build().map_err(|e| format!("Could not initialize network client: {e}"))?;
+
+    // Known media domains/manifests go straight to yt-dlp. For other URLs,
+    // inspect the response type so generic yt-dlp-supported web pages also work.
+    let media_page = needs_media_extractor(&parsed) || looks_like_html_page(&client, &url).await;
+    if media_page {
+        set_status(&manager, &id, "Extracting media", None);
+        return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, &cancel).await;
+    }
+    let name = suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8]));
+    let target = unique_path(&destination, &name);
+    set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     set_status(&manager, &id, "Downloading", None);
     download_http(&client, &url, &target, &destination, &id, concurrency, &manager, &cancel).await
+}
+
+async fn looks_like_html_page(client: &Client, url: &str) -> bool {
+    let head = client.head(url).send().await;
+    if let Ok(response) = head {
+        if response.status().is_success() {
+            return response.headers().get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| {
+                    let mime = value.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                    mime == "text/html" || mime == "application/xhtml+xml"
+                }).unwrap_or(false);
+        }
+    }
+    // Some download hosts reject HEAD; a one-byte range request is a fallback.
+    match client.get(url).header(header::RANGE, "bytes=0-0").send().await {
+        Ok(response) if response.status().is_success() || response.status() == StatusCode::PARTIAL_CONTENT =>
+            response.headers().get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(|value| {
+                    let mime = value.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+                    mime == "text/html" || mime == "application/xhtml+xml"
+                }).unwrap_or(false),
+        _ => false,
+    }
 }
 
 fn needs_media_extractor(url: &Url) -> bool {
