@@ -12,7 +12,7 @@
       <feGaussianBlur stdDeviation="24"/>
     </filter>
   </defs>
-  <rect width="1024" height="1024" rx="230" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
   <circle cx="530" cy="500" r="340" fill="#6ba9ff" opacity=".13" filter="url(#shadow)"/>
   <path d="M256 214h512a40 40 0 0 1 40 40v516a40 40 0 0 1-40 40H256a40 40 0 0 1-40-40V254a40 40 0 0 1 40-40Z" fill="#1b2944" stroke="#8bb7ff" stroke-opacity=".15" stroke-width="8"/>
   <path d="M342 320h206c128 0 218 75 218 191S676 704 548 704H342V320Zm105 91v202h91c74 0 122-38 122-102s-48-100-122-100h-91Z" fill="url(#mark)"/>
