@@ -1,0 +1,25 @@
+[package]
+name = "downbest"
+version = "1.0.0"
+description = "DownBest high-speed cross-platform download manager"
+authors = ["DownBest Contributors"]
+edition = "2021"
+
+[lib]
+name = "downbest_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "gzip", "brotli", "deflate"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "io-util", "sync", "time", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+dirs = "6"
+url = "2"
