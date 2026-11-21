@@ -10,10 +10,11 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::Command,
+    io::AsyncWriteExt,
     sync::Semaphore,
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tokio::{io::{AsyncBufReadExt, AsyncReadExt, BufReader}, process::Command};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -158,6 +159,7 @@ fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
     records.retain(|_, item| !matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled"));
     Ok(())
 }
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tauri::command]
 async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
     let mut result = Vec::new();
@@ -172,6 +174,14 @@ async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
         }
     }
     result
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+#[tauri::command]
+async fn check_engines(_app: AppHandle) -> Vec<ToolStatus> {
+    ["yt-dlp", "aria2c", "ffmpeg"].into_iter()
+        .map(|name| ToolStatus { name: name.into(), available: false, version: None })
+        .collect()
 }
 
 async fn execute_download(
