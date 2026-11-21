@@ -520,6 +520,14 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
             candidates.push(parent.join(&executable));
         }
     }
+    #[cfg(target_os = "macos")]
+    for base in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+        candidates.push(PathBuf::from(base).join(&executable));
+    }
+    #[cfg(target_os = "linux")]
+    for base in ["/usr/local/bin", "/usr/bin", "/snap/bin"] {
+        candidates.push(PathBuf::from(base).join(&executable));
+    }
     for path in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
         candidates.push(path.join(&executable));
     }
