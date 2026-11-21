@@ -2,70 +2,98 @@
 
 **A Rust + Tauri 2 download manager for Windows, macOS, Linux, Android and iOS.**
 
-DownBest is designed to use your available connection efficiently. Its direct-file engine uses adaptive HTTP byte-range downloads, while supported media-site links are routed through yt-dlp on desktop.
+DownBest combines a native async HTTP/HTTPS engine with desktop media extraction. The goal is to use available bandwidth efficiently without promising a multiplier that the network or source server cannot deliver.
 
 ## Current implementation
 
-- Rust async HTTP/HTTPS downloader with parallel byte-range segments (1–32 connections, selected by the user).
-- Automatic fallback to a normal stream when the server does not support HTTP range requests.
-- Up to three simultaneous download jobs, with additional jobs queued.
-- Live progress, byte counts, average speed, cancellation and completed-item cleanup.
-- Desktop media extraction through yt-dlp: audio-only, video with audio, and video-only modes.
-- yt-dlp concurrent DASH/HLS fragments; aria2c is selected for supported HTTP/FTP transfers when installed.
-- FFmpeg is used by yt-dlp to merge separate video/audio streams when available.
-- One Tauri 2 codebase and one Git branch: main.
+- Adaptive parallel HTTP byte-range downloads (selected profile: 4, 8, 16 or 32 connections).
+- A server capability probe, identity encoding for reliable byte offsets, and automatic single-connection fallback when range requests are unsupported or rejected.
+- Up to three simultaneous download jobs; further jobs wait in the in-memory queue.
+- Live byte counts, progress, average throughput, cancellation and queue cleanup.
+- Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests.
+- Audio-only, video-only and video+audio format selection for media-extractor links.
+- yt-dlp concurrent fragment downloads; optional aria2c for HTTP/FTP transfers while its native downloader remains selected for DASH/HLS.
+- FFmpeg is used by yt-dlp to merge separate audio and video streams when installed.
+- App-specific private storage is used as the default destination on Android/iOS.
+- One Tauri 2 codebase and one Git branch: `main`.
 
-## Supported targets
+## Supported targets and current limits
 
-| Target | Package goal | Current engine coverage |
+| Platform | Build package | Current download support |
 |---|---|---|
-| Windows | EXE / MSI | Direct HTTP(S), yt-dlp/aria2c/FFmpeg when installed |
-| macOS | DMG / APP | Direct HTTP(S), yt-dlp/aria2c/FFmpeg when installed |
-| Linux | AppImage / DEB / RPM | Direct HTTP(S), yt-dlp/aria2c/FFmpeg when installed |
-| Android | APK | Direct HTTP(S) links |
-| iOS | IPA | Direct HTTP(S) links; Apple signing setup required |
+| Windows | EXE / MSI | Direct HTTP(S) and desktop media extractors |
+| macOS | DMG / APP | Direct HTTP(S) and desktop media extractors |
+| Linux | AppImage / DEB / RPM | Direct HTTP(S) and desktop media extractors |
+| Android | APK | Direct HTTP(S) file links |
+| iOS | IPA | Direct HTTP(S) file links; Apple signing is required |
 
-**Important mobile limitation:** yt-dlp and aria2c are desktop executables in this first implementation. YouTube and similar media-site extraction is therefore desktop-only. Direct downloadable HTTP/HTTPS URLs work on Android and iOS. iOS device distribution requires Apple Developer signing credentials and a provisioning profile.
+**Mobile limitation:** yt-dlp, aria2c and FFmpeg are desktop executables in this first version. Media-site extraction (for example, YouTube pages) is desktop-only; direct downloadable HTTP/HTTPS file URLs work on mobile. The default mobile save path is inside the app's private storage. Exporting files into the public Downloads folder needs a native file-export / Storage Access Framework workflow and is not yet implemented.
+
+yt-dlp supports many extractors, but no application can guarantee that every website, DRM-protected stream, login-gated media item or regional restriction will work. DownBest does not bypass DRM, authentication, access controls or source-server rate limits.
 
 ## Build locally
 
-Install Node.js 22+, Rust stable, and the platform prerequisites in the Tauri 2 documentation.
+Install Node.js 22+, Rust stable and the system prerequisites for your host OS from the Tauri 2 documentation.
+
+Generate the required platform icons from the included SVG source:
 
     npm install
+    npm run tauri icon app-icon.svg
+
+Run the development app:
+
     npm run tauri dev
 
-Release build for desktop:
+Build a desktop release:
 
     npm run tauri build
 
-Android (on a configured Android SDK/NDK host):
+Android (configured Android SDK/NDK and Java 17):
 
     npm run tauri android init
     npm run tauri android build -- --apk
 
-iOS (on macOS with Xcode and signing configured):
+iOS (macOS + Xcode + Apple Developer signing configured):
 
     npm run tauri ios init
-    npm run tauri ios build -- --export-method development
+    npm run tauri ios build -- --export-method app-store-connect
 
-## Optional media tools
+## Optional desktop media tools
 
-Install yt-dlp and optionally aria2c and FFmpeg, then make them available on PATH or place them in a tools directory beside the app executable.
+Install platform-matching releases and place them on PATH, or in a `tools/` folder beside the installed app executable:
 
-- yt-dlp — media-site URL extraction.
-- aria2c — multi-connection HTTP/FTP transfers invoked by yt-dlp when available.
-- FFmpeg — merging separate audio/video streams.
+- `yt-dlp` — media-site extraction.
+- `aria2c` — optional accelerated HTTP/FTP transfers invoked by yt-dlp.
+- `ffmpeg` — merge separate audio/video streams.
 
-The Rust HTTP engine does not require aria2c. It performs byte-range segmentation itself when the origin server supports it.
+The native Rust direct-file downloader does not require these tools. Do not download binaries from untrusted mirrors; review upstream licences before redistributing third-party tools.
 
-## Build artifacts
+## GitHub Actions builds
 
-The GitHub Actions workflow runs on pushes to main and can be started manually. Desktop packages and Android APKs are uploaded as workflow artifacts. The signed iOS job is opt-in: set the repository variable ENABLE_SIGNED_IOS_BUILD=true and configure Apple Developer signing first.
+The workflow runs on pushes to `main` and can also be started manually. It generates the platform icons and builds:
 
-## Speed expectations
+- Windows installer (.exe via NSIS)
+- macOS DMG for Apple Silicon and Intel
+- Linux AppImage and DEB
+- Android APKs split by ABI
 
-No download manager can promise a fixed multiplier. Actual throughput is limited by ISP bandwidth, server-side connection limits, CDN behavior, protocol support, disk speed and CPU. DownBest caps parallel range requests at the selected profile and falls back when the server refuses ranges; it does not attempt to bypass access controls or rate limits.
+The iOS job is disabled until Apple signing secrets are configured and the repository variable `ENABLE_SIGNED_IOS_BUILD=true` is set. Add these repository secrets:
+
+- `APPLE_DEVELOPMENT_TEAM` — your Apple Developer Team ID.
+- `IOS_CERTIFICATE` — base64-encoded Apple signing `.p12` certificate.
+- `IOS_CERTIFICATE_PASSWORD` — password used when exporting the `.p12`.
+- `IOS_MOBILE_PROVISION` — base64-encoded App Store provisioning profile for bundle ID `com.nazimassdi.downbest`.
+
+The workflow will then export an App Store Connect IPA. Apple account enrollment, a valid distribution certificate and a matching active provisioning profile are required.
+
+Packages are uploaded to the corresponding GitHub Actions run as workflow artifacts; they are not automatically published as a GitHub Release.
+
+## Speed and reliability notes
+
+The connection selector is a maximum requested parallelism, not a promise that every host accepts that many connections. Actual throughput depends on ISP bandwidth, server/CDN limits, protocol, file size, disk and CPU. Small files use one stream because segmentation overhead would not help. If a host rejects range requests, DownBest retries using one stream.
+
+This initial version keeps the download queue in memory; unfinished direct-file downloads do not yet survive an app restart. Automatic pause/resume from a persisted partial file is a later reliability milestone.
 
 ## Project status
 
-This repository started empty. This is the first application scaffold; it is not a claim that all platform installers or every media website have already been tested. CI build results and real-device tests are the source of truth for release readiness.
+The repository started empty and now contains the first cross-platform scaffold, UI, Rust download core and CI workflow. Build jobs and real-device testing still need to pass before the installers can be called release-ready.
