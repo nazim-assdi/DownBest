@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: downbest-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   desktop:
     name: Desktop · ${{ matrix.os }}
