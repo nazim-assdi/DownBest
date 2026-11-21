@@ -77,10 +77,10 @@ jobs:
           echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
       - name: Install frontend dependencies
         run: npm install
-      - name: Generate app icons
-        run: npm run tauri icon app-icon.svg
       - name: Initialize Android project
         run: npm run tauri android init
+      - name: Generate app icons
+        run: npm run tauri icon app-icon.svg
       - name: Build APKs
         run: npm run tauri android build -- --apk --split-per-abi
       - name: Upload Android APKs
@@ -106,10 +106,10 @@ jobs:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
       - name: Install frontend dependencies
         run: npm install
-      - name: Generate app icons
-        run: npm run tauri icon app-icon.svg
       - name: Initialize iOS project
         run: npm run tauri ios init
+      - name: Generate app icons
+        run: npm run tauri icon app-icon.svg
       - name: Build iOS IPA
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
