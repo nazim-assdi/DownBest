@@ -58,7 +58,13 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
 }
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
     if let Ok(mut records) = manager.records.lock() {
-        if let Some(record) = records.get_mut(id) { record.status = status.to_string(); record.error = error; }
+        if let Some(record) = records.get_mut(id) {
+            if matches!(status, "Downloading" | "Extracting media") {
+                record.started = Instant::now();
+            }
+            record.status = status.to_string();
+            record.error = error;
+        }
     }
 }
 fn set_total(manager: &DownloadManager, id: &str, total: Option<u64>) {
@@ -192,7 +198,8 @@ async fn execute_download(
 
     // Known media domains/manifests go straight to yt-dlp. For other URLs,
     // inspect the response type so generic yt-dlp-supported web pages also work.
-    let media_page = needs_media_extractor(&parsed) || looks_like_html_page(&client, &url).await;
+    let media_page = kind != "file"
+        && (needs_media_extractor(&parsed) || looks_like_html_page(&client, &url).await);
     if media_page {
         set_status(&manager, &id, "Extracting media", None);
         return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, &cancel).await;
