@@ -534,6 +534,7 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(DownloadManager::default())
