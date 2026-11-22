@@ -20,6 +20,7 @@ type Tool = { name: string; available: boolean; version: string | null };
 
 const root = document.querySelector<HTMLDivElement>("#app")!;
 let downloads: Download[] = [];
+let desktopFileActions = false;
 let filter = "all";
 let busy = false;
 let pollTimer: number | undefined;
@@ -161,11 +162,13 @@ function renderDownloads() {
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ? "indeterminate" : "";
     const bar = done ? 100 : pct;
     const output = done && d.file_path
-      ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
+      ? desktopFileActions
+        ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
+        : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
       : "";
     const action = !finalStatus(d.status)
       ? '<button class="icon-action cancel" data-cancel="' + safe(d.id) + '" title="Cancel download">' + icons.close + '</button>'
-      : done && d.file_path
+      : done && d.file_path && desktopFileActions
         ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
         : '<span class="finish-mark ' + statusClass + '">' + (failedItem || cancelled ? icons.close : icons.check) + '</span>';
     return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(d.status) + '</span></div><p>' + detail + '</p><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><div class="download-meta"><span>' + (done ? "100% complete" : pct.toFixed(1) + "%") + ' <em>·</em> ' + safe(d.kind.toUpperCase()) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
@@ -379,10 +382,12 @@ void Promise.all([
   refreshDownloads(),
   refreshTools(),
   invoke<boolean>("supports_folder_picker").then(supported => {
+    desktopFileActions = supported;
     if (!supported) {
       const button = document.querySelector<HTMLButtonElement>("#choose-folder");
       if (button) button.hidden = true;
     }
+    renderDownloads();
   }).catch(() => {})
 ]);
 scheduleRefresh(500);
