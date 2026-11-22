@@ -575,11 +575,13 @@ async fn run_media_download(
     let aria2 = find_tool(app, "aria2c");
     let mut command = Command::new(&yt_dlp);
     configure_tool_environment(&mut command, &yt_dlp);
+    configure_no_console(&mut command);
     command.arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
         .arg("--retries").arg("10").arg("--fragment-retries").arg("10")
         .arg("--file-access-retries").arg("3").arg("-N").arg(concurrency.to_string())
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
-        .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s")
+        .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
+        .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg("%(title).180B [%(id)s].%(ext)s");
     match kind {
         "audio" => { command.arg("-f").arg("bestaudio/best"); }
