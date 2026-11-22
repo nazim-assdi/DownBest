@@ -111,9 +111,11 @@ jobs:
           curl -fsSL "https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz" -o "$RUNNER_TEMP/ffmpeg-9.1.tar.xz"
           tar -xf "$RUNNER_TEMP/ffmpeg-9.1.tar.xz" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/ffmpeg-9.1"
-          ./configure --prefix="$RUNNER_TEMP/ffmpeg-install" --disable-gpl --disable-nonfree --disable-autodetect --enable-static --disable-shared --disable-debug --disable-doc --disable-ffplay
+          ./configure --prefix="$RUNNER_TEMP/ffmpeg-install" --disable-gpl --disable-nonfree --disable-autodetect --enable-static --disable-shared --disable-debug --disable-doc --enable-ffmpeg --enable-ffprobe --disable-ffplay
           make -j"$(sysctl -n hw.ncpu)"
           make install
+          test -x "$RUNNER_TEMP/ffmpeg-install/bin/ffmpeg"
+          test -x "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe"
           cp "$RUNNER_TEMP/ffmpeg-install/bin/ffmpeg" "$tools/ffmpeg"
           cp "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe" "$tools/ffprobe"
           chmod +x "$tools/aria2c" "$tools/ffmpeg" "$tools/ffprobe"
