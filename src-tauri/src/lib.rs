@@ -34,7 +34,7 @@ impl Default for DownloadManager {
 
 struct DownloadRecord {
     id: String, url: String, file_name: String, kind: String, status: String,
-    destination: String, downloaded: Arc<AtomicU64>, total: Option<u64>,
+    destination: String, file_path: Option<String>, downloaded: Arc<AtomicU64>, total: Option<u64>,
     started: Instant, error: Option<String>, cancel: CancellationToken,
     progress_override: Option<f64>,
 }
@@ -42,7 +42,7 @@ struct DownloadRecord {
 #[derive(Serialize, Clone)]
 struct DownloadView {
     id: String, url: String, file_name: String, kind: String, status: String,
-    destination: String, downloaded_bytes: u64, total_bytes: Option<u64>,
+    destination: String, file_path: Option<String>, downloaded_bytes: u64, total_bytes: Option<u64>,
     speed_bytes_sec: u64, progress: f64, error: Option<String>,
 }
 #[derive(Serialize)]
@@ -57,14 +57,14 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
     DownloadView {
         id: record.id.clone(), url: record.url.clone(), file_name: record.file_name.clone(),
         kind: record.kind.clone(), status: record.status.clone(), destination: record.destination.clone(),
-        downloaded_bytes: downloaded, total_bytes: record.total,
+        file_path: record.file_path.clone(), downloaded_bytes: downloaded, total_bytes: record.total,
         speed_bytes_sec: (downloaded as f64 / elapsed) as u64, progress, error: record.error.clone(),
     }
 }
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
-            if matches!(status, "Downloading" | "Extracting media") {
+            if record.status != status && matches!(status, "Downloading" | "Extracting media") {
                 record.started = Instant::now();
             }
             if status == "Completed" {
@@ -134,7 +134,7 @@ async fn start_download(
     let record = DownloadRecord {
         id: id.clone(), url: url.clone(),
         file_name: suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8])),
-        kind: kind.clone(), status: "Queued".into(), destination: destination_path.display().to_string(),
+        kind: kind.clone(), status: "Queued".into(), destination: destination_path.display().to_string(), file_path: None,
         downloaded: Arc::new(AtomicU64::new(0)), total: None, started: Instant::now(),
         error: None, cancel: cancel.clone(), progress_override: None,
     };
