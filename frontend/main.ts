@@ -39,8 +39,8 @@ function toast(message: string, error = false) {
 root.innerHTML = '<div class="layout">' +
   '<aside class="sidebar"><div class="brand"><div class="brand-mark">D</div><div><b>DownBest Lite</b><small>DOWNLOAD MANAGER</small></div></div>' +
   '<div class="side-label">WORKSPACE</div><div class="nav active">' + icons.download + '<span>Downloads</span><b id="active-count">0</b></div>' +
-  '<div class="side-tip"><div class="tip-icon">' + icons.bolt + '</div><b>Smart acceleration</b><p>Adaptive parallel connections for compatible file servers.</p></div>' +
-  '<div class="sidebar-foot"><span>PRIVATE BY DESIGN</span><small>DOWNBEST 1.0.0</small></div></aside>' +
+  '<div class="side-tip"><div class="tip-icon">' + icons.bolt + '</div><b>Lite engine</b><p>Fewer background resources, buffered writes and adaptive connections.</p></div>' +
+  '<div class="sidebar-foot"><span>PRIVATE BY DESIGN</span><small>DOWNBEST LITE 1.1.0</small></div></aside>' +
   '<main class="main"><header><div><span class="eyebrow">YOUR DOWNLOAD WORKSPACE</span><h1>Downloads</h1></div><div class="right-head"><i></i> Engine ready <button id="refresh">' + icons.gauge + '</button></div></header>' +
   '<section class="hero"><div class="hero-copy"><span class="chip">● &nbsp; LITE ENGINE · LOW CPU</span><h2>Get more from<br><em>every connection.</em></h2><p>Paste a file link or supported media URL. DownBest chooses the best available download route.</p><div class="stats"><div><b>2–8</b><small>Connections</small></div><div><b>2 Jobs</b><small>At once</small></div><div><b>5 OS</b><small>One project</small></div></div></div><div class="hero-orbit"><div class="orbit"></div><div class="speed-ring">' + icons.bolt + '<b>FAST</b><small>DOWNLOAD</small></div><span class="float one">HTTP / HTTPS</span><span class="float two">DASH · HLS</span></div></section>' +
   '<section class="panel"><div class="section-top"><div><span class="eyebrow">NEW DOWNLOAD</span><h2>What do you want to download?</h2></div><span class="step">01</span></div>' +
