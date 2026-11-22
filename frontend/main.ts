@@ -303,9 +303,10 @@ cookiesInput.addEventListener("change", async () => {
   }
   try {
     const contents = await file.text();
-    const hasCookieRows = contents.split(/\r?\n/).some(line =>
-      line.trim() && !line.startsWith("#") && line.split("\t").length >= 7
-    );
+    const hasCookieRows = contents.split(/\r?\n/).some(line => {
+      const row = line.startsWith("#HttpOnly_") ? line.slice("#HttpOnly_".length) : line;
+      return row.trim() && !row.startsWith("#") && row.split("\t").length >= 7;
+    });
     if (!hasCookieRows) throw new Error("Choose a Netscape-format cookies.txt export.");
     cookiesText = contents;
     cookiesName.textContent = file.name;
