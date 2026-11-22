@@ -82,7 +82,16 @@ The workflow runs on pushes to `main` and can also be started manually. It gener
 - Windows EXE (NSIS) and MSI
 - macOS DMG for Apple Silicon and Intel
 - Linux AppImage, DEB and RPM
-- Android APKs split by ABI
+- Android APKs split by ABI (signed and verified for direct installation)
+
+The Android CI step zip-aligns each APK, signs it with APK Signature Scheme support, verifies the signature and package manifest, checks the ABI-specific Rust library, and refuses to upload unsigned APKs. Without a persistent signing key, CI creates a temporary test-signing key for that workflow run; a later run will have a different certificate, so uninstall the previous CI build before installing the next one. For repeatable in-place app updates, configure these repository secrets with your own private Android release keystore:
+
+- `DOWNBEST_ANDROID_KEYSTORE_BASE64` — base64-encoded keystore file.
+- `DOWNBEST_ANDROID_STORE_PASSWORD` — keystore password.
+- `DOWNBEST_ANDROID_KEY_ALIAS` — signing key alias.
+- `DOWNBEST_ANDROID_KEY_PASSWORD` — signing key password.
+
+Keep the keystore private and back it up securely. Do not commit it to the repository.
 
 The iOS job is disabled until Apple signing secrets are configured and the repository variable `ENABLE_SIGNED_IOS_BUILD=true` is set. Add these repository secrets:
 
