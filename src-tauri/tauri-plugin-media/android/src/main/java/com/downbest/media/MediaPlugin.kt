@@ -84,7 +84,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 // FFmpegKit converts audio-only downloads into a portable M4A.
                 if (args.kind == "audio") {
                     val m4a = File(downloaded.parentFile, downloaded.nameWithoutExtension + ".m4a")
-                    val command = "-y -i ${shellQuote(downloaded.absolutePath)} -vn -c:a aac -b:a 192k ${shellQuote(m4a.absolutePath)}"
+                    val command = "-y -i ${shellQuote(downloaded.absolutePath)} -vn -c:a aac -b:a 192k -threads 2 ${shellQuote(m4a.absolutePath)}"
                     val session = FFmpegKit.execute(command)
                     if (!ReturnCode.isSuccess(session.returnCode)) {
                         throw IllegalStateException("Audio was downloaded, but the built-in audio converter failed. Original file: ${downloaded.name}")
