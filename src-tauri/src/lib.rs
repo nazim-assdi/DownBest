@@ -690,6 +690,45 @@ async fn download_open_hls(
     Ok(())
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn configure_tool_environment(command: &mut Command, tool_path: &Path) {
+    if let Some(parent) = tool_path.parent() {
+        let mut paths: Vec<PathBuf> = std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default()
+        ).collect();
+        paths.insert(0, parent.to_path_buf());
+        if let Ok(joined) = std::env::join_paths(paths) {
+            command.env("PATH", joined);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let lib_dir = parent.join("lib");
+            if lib_dir.is_dir() {
+                let mut library_paths = vec![lib_dir];
+                library_paths.extend(std::env::split_paths(
+                    &std::env::var_os("LD_LIBRARY_PATH").unwrap_or_default()
+                ));
+                if let Ok(joined) = std::env::join_paths(library_paths) {
+                    command.env("LD_LIBRARY_PATH", joined);
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let lib_dir = parent.join("lib");
+            if lib_dir.is_dir() {
+                let mut library_paths = vec![lib_dir];
+                library_paths.extend(std::env::split_paths(
+                    &std::env::var_os("DYLD_LIBRARY_PATH").unwrap_or_default()
+                ));
+                if let Ok(joined) = std::env::join_paths(library_paths) {
+                    command.env("DYLD_LIBRARY_PATH", joined);
+                }
+            }
+        }
+    }
+}
+
 fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
     let executable = if cfg!(windows) && !name.ends_with(".exe") { format!("{name}.exe") } else { name.to_string() };
     let mut candidates = Vec::new();
