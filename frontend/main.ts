@@ -332,7 +332,7 @@ function updateUrlCount() {
 
 document.querySelector<HTMLTextAreaElement>("#urls")!.addEventListener("input", updateUrlCount);
 
-document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {
+document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {
   event.preventDefault();
   if (busy) return;
   const urls = document.querySelector<HTMLTextAreaElement>("#urls")!.value
