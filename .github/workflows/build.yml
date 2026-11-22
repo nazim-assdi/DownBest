@@ -172,10 +172,10 @@ jobs:
           import re
           gradle = Path("src-tauri/gen/android/app/build.gradle.kts")
           content = gradle.read_text()
-          content, changed = re.subn(r"(?m)^(\\s*compileSdk\\s*=\\s*)\\d+", r"\\g<1>36", content, count=1)
+          content, changed = re.subn(r"(?m)^(\s*compileSdk\s*=\s*)\d+", r"\g<1>36", content, count=1)
           if not changed:
               raise SystemExit("Could not locate compileSdk in generated Android app/build.gradle.kts")
-          content = re.sub(r"(?m)^(\\s*targetSdk\\s*=\\s*)\\d+", r"\\g<1>36", content, count=1)
+          content = re.sub(r"(?m)^(\s*targetSdk\s*=\s*)\d+", r"\g<1>36", content, count=1)
           gradle.write_text(content)
           print("Android compileSdk/targetSdk set to API 36")
           PY
