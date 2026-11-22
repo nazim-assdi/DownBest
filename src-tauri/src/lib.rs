@@ -1185,7 +1185,7 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 mod lite_mode_tests {
     use super::{effective_segment_count, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
     use reqwest::header;
-    use std::{sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
+    use std::{path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
