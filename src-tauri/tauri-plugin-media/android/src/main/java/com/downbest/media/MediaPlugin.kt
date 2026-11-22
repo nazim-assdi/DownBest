@@ -25,6 +25,7 @@ class DownloadArgs {
     var jobId: String = ""
     var kind: String = "auto"
     var concurrency: Int = 8
+    var cookiesFile: String? = null
     var onProgress: Channel? = null
 }
 
@@ -75,6 +76,14 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--part")
                     .addOption("--keep-fragments")
 
+                if (!args.cookiesFile.isNullOrBlank()) {
+                    val cookieFile = File(args.cookiesFile!!)
+                    require(cookieFile.isFile && cookieFile.canRead()) {
+                        "The imported cookies.txt file is no longer accessible. Import it again and retry."
+                    }
+                    request.addOption("--cookies", cookieFile.absolutePath)
+                }
+
                 when (args.kind) {
                     "audio" -> request.addOption("-f", "bestaudio/best")
                     "video-only" -> request.addOption("-f", "bestvideo")
@@ -83,10 +92,24 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 val future = YtDlp.executeAsync(request, DownloadProgressCallback { progress, eta, line ->
+                    val progressLine = line ?: ""
                     val payload = JSObject()
                     payload.put("progress", progress.toDouble())
                     payload.put("etaSeconds", eta)
-                    payload.put("line", line ?: "")
+                    payload.put("line", progressLine)
+                    val jobMarker = " - ${args.jobId}."
+                    val matchingFiles = folder.listFiles()
+                        ?.filter { it.isFile && it.name.contains(jobMarker) }
+                        ?: emptyList()
+                    val downloadedBytes = matchingFiles.sumOf { it.length() }
+                    payload.put("downloadedBytes", downloadedBytes)
+                    val parsedTotal = parseTotalBytes(progressLine)
+                    val estimatedTotal = parsedTotal ?: if (progress > 0.0 && downloadedBytes > 0L) {
+                        (downloadedBytes * 100.0 / progress).toLong()
+                    } else null
+                    if (estimatedTotal != null && estimatedTotal > 0L) {
+                        payload.put("totalBytes", estimatedTotal)
+                    }
                     try {
                         args.onProgress?.send(payload)
                     } catch (_: Exception) {
@@ -132,6 +155,26 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 invoke.reject(error.message ?: "Mobile media download failed.")
             }
         }, "DownBest-media-download").start()
+    }
+
+    private fun parseTotalBytes(line: String): Long? {
+        val match = Regex("""(?:of\\s+)(?:~)?([0-9]+(?:\\.[0-9]+)?)\\s*([KMGT]?i?B)""", RegexOption.IGNORE_CASE)
+            .find(line) ?: return null
+        val amount = match.groupValues[1].toDoubleOrNull() ?: return null
+        val unit = match.groupValues[2].uppercase()
+        val factor = when (unit) {
+            "B" -> 1.0
+            "KB" -> 1_000.0
+            "MB" -> 1_000_000.0
+            "GB" -> 1_000_000_000.0
+            "TB" -> 1_000_000_000_000.0
+            "KIB" -> 1024.0
+            "MIB" -> 1024.0 * 1024.0
+            "GIB" -> 1024.0 * 1024.0 * 1024.0
+            "TIB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+            else -> return null
+        }
+        return (amount * factor).toLong().takeIf { it > 0L }
     }
 
     private fun shellQuote(value: String): String =
