@@ -14,19 +14,38 @@ import dev.ffmpegkit_maintained.ytdlp.YtDlpRequest
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 @InvokeArg
 class DownloadArgs {
     var url: String = ""
     var destination: String = ""
+    var jobId: String = ""
     var kind: String = "auto"
     var concurrency: Int = 8
     var onProgress: Channel? = null
 }
 
+@InvokeArg
+class CancelDownloadArgs {
+    var jobId: String = ""
+}
+
 @TauriPlugin
 class MediaPlugin(private val activity: Activity) : Plugin(activity) {
+    private val activeDownloads = ConcurrentHashMap<String, Future<*>>()
+
+    @Command
+    fun cancelDownload(invoke: Invoke) {
+        val args = invoke.parseArgs(CancelDownloadArgs::class.java)
+        val cancelled = activeDownloads.remove(args.jobId)?.cancel(true) ?: false
+        val result = JSObject()
+        result.put("cancelled", cancelled)
+        invoke.resolve(result)
+    }
+
     @Command
     fun download(invoke: Invoke) {
         val args = invoke.parseArgs(DownloadArgs::class.java)
@@ -43,13 +62,18 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     throw IllegalStateException("The selected save location is not a folder.")
                 }
 
+                require(args.jobId.matches(Regex("[A-Za-z0-9_-]{8,64}"))) {
+                    "The download job identifier is invalid."
+                }
                 YtDlp.init(activity.applicationContext)
-                val startedAt = System.currentTimeMillis()
-                val template = File(folder, "%(title).180B [%(id)s].%(ext)s").absolutePath
+                val template = File(folder, "%(title).180B [%(id)s] - ${args.jobId}.%(ext)s").absolutePath
                 val request = YtDlpRequest(args.url)
                     .setOutputTemplate(template)
                     .addOption("--no-playlist")
                     .addOption("--newline")
+                    .addOption("--continue")
+                    .addOption("--part")
+                    .addOption("--keep-fragments")
 
                 when (args.kind) {
                     "audio" -> request.addOption("-f", "bestaudio/best")
@@ -69,15 +93,21 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                         // A closed progress channel must not abort the transfer.
                     }
                 })
-                val response = future.get(6, TimeUnit.HOURS)
+                activeDownloads[args.jobId] = future
+                val response = try {
+                    future.get(6, TimeUnit.HOURS)
+                } finally {
+                    activeDownloads.remove(args.jobId, future)
+                }
                 if (!response.isSuccess) {
                     throw IllegalStateException("yt-dlp failed with exit code ${response.exitCode}. Check whether the source requires sign-in, has changed, or blocks this downloader.")
                 }
 
+                val jobMarker = " - ${args.jobId}."
                 val downloaded = folder.listFiles()
-                    ?.filter { it.isFile && it.lastModified() >= startedAt && !it.name.endsWith(".part") }
+                    ?.filter { it.isFile && it.name.contains(jobMarker) && !it.name.endsWith(".part") }
                     ?.maxByOrNull { it.lastModified() }
-                    ?: throw IllegalStateException("The extractor finished but no output file was found.")
+                    ?: throw IllegalStateException("The extractor finished but no output file was found for this job.")
 
                 var output = downloaded
                 // Android has no desktop ffmpeg executable. The bundled LGPL

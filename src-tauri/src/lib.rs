@@ -20,6 +20,8 @@ use url::Url;
 use uuid::Uuid;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri_plugin_media::{MediaDownloadRequest, MediaExt, MediaProgress};
+#[cfg(target_os = "android")]
+use tauri_plugin_media::MediaCancelRequest;
 
 #[derive(Clone)]
 struct DownloadManager {
@@ -337,15 +339,27 @@ fn get_downloads(manager: State<'_, DownloadManager>) -> Result<Vec<DownloadView
     Ok(result)
 }
 #[tauri::command]
-fn pause_download(manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
-    {
+async fn pause_download(app: AppHandle, manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
+    let was_media = {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
         if matches!(record.status.as_str(), "Completed" | "Paused" | "Failed") { return Ok(()); }
+        let media = record.status == "Extracting media";
         record.status = "Pausing".into();
         record.cancel.cancel();
-    }
+        media
+    };
     persist_records(manager.inner());
+    #[cfg(target_os = "android")]
+    if was_media {
+        let handle = app.clone();
+        let job_id = id.clone();
+        tokio::task::spawn_blocking(move || handle.media().cancel(MediaCancelRequest { job_id }))
+            .await.map_err(|e| format!("Android media cancellation worker failed: {e}"))?
+            .map_err(|e| format!("Could not pause Android media download: {e}"))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (app, was_media);
     Ok(())
 }
 #[tauri::command]
@@ -833,6 +847,7 @@ async fn run_media_download(
     let request = MediaDownloadRequest {
         url: url.as_str().to_string(),
         destination: destination.display().to_string(),
+        job_id: id.to_string(),
         kind: kind.to_string(),
         concurrency: concurrency.min(16),
         on_progress,
@@ -1168,8 +1183,9 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::{effective_segment_count, unique_path, DownloadManager, DownloadRecord};
-    use std::{sync::{atomic::AtomicU64, Arc}, time::Instant};
+    use super::{effective_segment_count, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
+    use reqwest::header;
+    use std::{sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
@@ -1210,6 +1226,43 @@ mod lite_mode_tests {
         assert_eq!(first.file_name().and_then(|value| value.to_str()), Some("same.zip"));
         assert_eq!(second.file_name().and_then(|value| value.to_str()), Some("same (1).zip"));
         std::fs::remove_dir_all(folder).expect("remove test directory");
+    }
+
+    #[test]
+    fn byte_range_resume_reads_the_exact_start_offset() {
+        let value = header::HeaderValue::from_static("bytes 4096-8191/16384");
+        assert_eq!(parse_content_range_start(Some(&value)), Some(4096));
+    }
+
+    #[test]
+    fn process_restart_restores_paused_job_and_partial_file() {
+        let folder = std::env::temp_dir().join(format!("downbest-recovery-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create recovery directory");
+        let queue_file = folder.join("queue.json");
+        let target = folder.join("movie.mp4");
+        let partial = PathBuf::from(format!("{}.downbest-recovery-job.tmp", target.display()));
+        std::fs::write(&partial, vec![7u8; 4096]).expect("write recoverable partial data");
+
+        let manager = DownloadManager::default();
+        manager.restore_queue(queue_file.clone());
+        let mut record = queued_record("recovery-job");
+        record.status = "Downloading".into();
+        record.destination = folder.display().to_string();
+        record.file_path = Some(target.display().to_string());
+        record.downloaded.store(4096, Ordering::Relaxed);
+        manager.records.lock().expect("lock original queue").insert(record.id.clone(), record);
+        persist_records(&manager);
+
+        // A fresh manager is equivalent to a new process opening the persisted queue.
+        let reopened = DownloadManager::default();
+        reopened.restore_queue(queue_file);
+        let records = reopened.records.lock().expect("lock restored queue");
+        let restored = records.get("recovery-job").expect("restored unfinished job");
+        assert_eq!(restored.status, "Paused");
+        assert_eq!(partial_bytes_for(restored), 4096);
+        assert_eq!(restored.downloaded.load(Ordering::Relaxed), 4096);
+        drop(records);
+        std::fs::remove_dir_all(folder).expect("remove recovery directory");
     }
 
     #[test]

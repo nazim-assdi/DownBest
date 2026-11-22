@@ -6,9 +6,22 @@ use tauri::ipc::Channel;
 pub struct MediaDownloadRequest {
     pub url: String,
     pub destination: String,
+    pub job_id: String,
     pub kind: String,
     pub concurrency: usize,
     pub on_progress: Channel<MediaProgress>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCancelRequest {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaCancelResult {
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

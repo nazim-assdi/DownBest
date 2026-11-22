@@ -4,7 +4,7 @@ use tauri::{
     plugin::{PluginApi, PluginHandle},
 };
 
-use crate::{MediaDownloadRequest, MediaDownloadResult};
+use crate::{MediaCancelRequest, MediaCancelResult, MediaDownloadRequest, MediaDownloadResult};
 
 #[cfg(target_os = "android")]
 const PLUGIN_IDENTIFIER: &str = "com.downbest.media";
@@ -28,5 +28,10 @@ pub struct Media<R: Runtime>(PluginHandle<R>);
 impl<R: Runtime> Media<R> {
     pub fn download(&self, payload: MediaDownloadRequest) -> crate::Result<MediaDownloadResult> {
         self.0.run_mobile_plugin("download", payload).map_err(Into::into)
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn cancel(&self, payload: MediaCancelRequest) -> crate::Result<MediaCancelResult> {
+        self.0.run_mobile_plugin("cancelDownload", payload).map_err(Into::into)
     }
 }
