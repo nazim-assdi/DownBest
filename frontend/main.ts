@@ -23,6 +23,7 @@ let downloads: Download[] = [];
 let desktopFileActions = false;
 let filter = "all";
 let busy = false;
+let cookiesText: string | null = null;
 let pollTimer: number | undefined;
 
 const icons: Record<string, string> = {
@@ -85,6 +86,7 @@ root.innerHTML = [
   '<div class="fields"><div><label for="kind">CONTENT TYPE</label><select id="kind"><option value="auto">Auto detect</option><option value="file">Direct file</option><option value="audio">Audio only</option><option value="video">Video + audio</option><option value="video-only">Video only</option></select></div>',
   '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2" selected>Lite · Low CPU</option><option value="4">Balanced · 4 connections</option><option value="8">High throughput · 8 connections</option></select></div>',
   '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default Downloads folder"><button id="choose-folder" type="button">Browse</button></div></div></div>',
+  '<div class="cookie-import"><div><label>SITE LOGIN COOKIES · OPTIONAL</label><p>For videos that need sign-in, import your own Netscape-format cookies.txt. Never enter your password here.</p></div><div class="cookie-actions"><input id="cookies-file" type="file" accept=".txt,.cookies,text/plain" hidden><button id="import-cookies" type="button">Import cookies.txt</button><span id="cookies-name">No cookies imported</span><button id="clear-cookies" type="button" disabled>Clear</button></div></div>',
   '<div class="composer-bottom"><p class="note">Pause safely at any time. DownBest saves your queue and resumes partial downloads after restart.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
   '<section class="engine-strip"><div class="engine-title"><span class="eyebrow">DOWNLOAD ENGINES</span><b>Ready for your links</b></div><div id="engine-list"><span class="engine-loading">Checking installed tools…</span></div></section>',
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
@@ -154,14 +156,19 @@ function renderDownloads() {
     const eta = d.total_bytes && d.speed_bytes_sec > 0
       ? " · " + formatTime((d.total_bytes - d.downloaded_bytes) / d.speed_bytes_sec) + " left"
       : "";
-    const speed = d.speed_bytes_sec > 0 ? bytes(d.speed_bytes_sec) + "/s" : (queued ? "Waiting for a free slot" : "Connecting…");
+    const speed = d.speed_bytes_sec > 0 ? bytes(d.speed_bytes_sec) + "/s" :
+      queued ? "Waiting for a free slot" :
+      d.status === "Connecting" ? "Contacting site…" :
+      d.status === "Extracting media" ? "Finding media formats…" :
+      d.status === "Downloading" ? "Starting transfer…" : "Preparing…";
     const detail = failedItem ? safe(d.error || "Download failed · you can resume this item") :
       paused ? "Paused · " + sizeDetail + " saved. Resume whenever you are ready." :
       cancelled ? "Download paused" :
       done ? "Saved successfully" :
       queued ? "Waiting in queue · starts automatically" :
-      sizeDetail + " · " + speed + eta;
-    const progressClass = d.status === "Connecting" || d.status === "Extracting media" ? "indeterminate" : "";
+      d.downloaded_bytes > 0 ? sizeDetail + " · " + speed + eta : speed;
+    const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
+      (d.status === "Downloading" && d.downloaded_bytes === 0) ? "indeterminate" : "";
     const bar = done ? 100 : pct;
     const output = done && d.file_path
       ? desktopFileActions
@@ -279,6 +286,46 @@ function updateUrlCount() {
 }
 
 document.querySelector<HTMLTextAreaElement>("#urls")!.addEventListener("input", updateUrlCount);
+
+const cookiesInput = document.querySelector<HTMLInputElement>("#cookies-file")!;
+const cookiesName = document.querySelector<HTMLElement>("#cookies-name")!;
+const clearCookies = document.querySelector<HTMLButtonElement>("#clear-cookies")!;
+document.querySelector<HTMLButtonElement>("#import-cookies")!.addEventListener("click", () => cookiesInput.click());
+cookiesInput.addEventListener("change", async () => {
+  const file = cookiesInput.files?.[0];
+  if (!file) return;
+  if (file.size > 4 * 1024 * 1024) {
+    cookiesInput.value = "";
+    toast("cookies.txt must be 4 MiB or smaller.", true);
+    return;
+  }
+  try {
+    const contents = await file.text();
+    const hasCookieRows = contents.split(/\\r?\\n/).some(line =>
+      line.trim() && !line.startsWith("#") && line.split("\\t").length >= 7
+    );
+    if (!hasCookieRows) throw new Error("Choose a Netscape-format cookies.txt export.");
+    cookiesText = contents;
+    cookiesName.textContent = file.name;
+    clearCookies.disabled = false;
+    toast("Site cookies imported securely for this session.");
+  } catch (error) {
+    cookiesText = null;
+    cookiesInput.value = "";
+    cookiesName.textContent = "No cookies imported";
+    clearCookies.disabled = true;
+    toast(String(error), true);
+  }
+});
+clearCookies.addEventListener("click", () => {
+  cookiesText = null;
+  cookiesInput.value = "";
+  cookiesName.textContent = "No cookies imported";
+  clearCookies.disabled = true;
+  toast("Imported site cookies cleared.");
+});
+
+document.querySelector<HTMLButtonElement>("#download-list")?.addEventListener("click", () => {});
 document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {
   event.preventDefault();
   if (busy) return;
@@ -295,7 +342,7 @@ document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("sub
   button.innerHTML = '<span class="spinner"></span><b>Adding ' + urls.length + ' links…</b>';
   try {
     const results = await Promise.allSettled(urls.map(url =>
-      invoke("start_download", { url, kind, destination: destination || null, concurrency })
+      invoke("start_download", { url, kind, destination: destination || null, concurrency, cookies: cookiesText })
     ));
     const added = results.filter(result => result.status === "fulfilled").length;
     const rejected = results.length - added;
