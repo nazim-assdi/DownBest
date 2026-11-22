@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex},
+    sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex},
     time::Instant,
 };
 use tauri::{AppHandle, Manager, State};
@@ -49,6 +49,8 @@ struct PersistedDownload {
     etag: Option<String>, last_modified: Option<String>,
     #[serde(default)]
     cookies_file: Option<String>,
+    #[serde(default)]
+    cancel_requested: bool,
 }
 
 #[cfg(target_os = "ios")]
@@ -66,6 +68,7 @@ struct DownloadRecord {
     progress_override: Option<f64>, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
     cookies_file: Option<String>,
+    cancel_requested: Arc<AtomicBool>,
 }
 
 impl DownloadManager {
@@ -78,9 +81,13 @@ impl DownloadManager {
         let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return; };
         if let Ok(mut records) = self.records.lock() {
             for item in items {
-                let status = match item.status.as_str() {
-                    "Completed" | "Failed" => item.status.clone(),
-                    _ => "Paused".to_string(),
+                let status = if item.cancel_requested {
+                    "Cancelled".to_string()
+                } else {
+                    match item.status.as_str() {
+                        "Completed" | "Failed" | "Cancelled" => item.status.clone(),
+                        _ => "Paused".to_string(),
+                    }
                 };
                 records.insert(item.id.clone(), DownloadRecord {
                     id: item.id, url: item.url, file_name: item.file_name, kind: item.kind,
@@ -91,6 +98,7 @@ impl DownloadManager {
                     concurrency: item.concurrency.clamp(1, 8),
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
+                    cancel_requested: Arc::new(AtomicBool::new(item.cancel_requested)),
                 });
             }
         }
@@ -111,6 +119,7 @@ fn persist_records(manager: &DownloadManager) {
             total_bytes: record.total, error: record.error.clone(), concurrency: record.concurrency,
             etag: record.etag.clone(), last_modified: record.last_modified.clone(),
             cookies_file: record.cookies_file.clone(),
+            cancel_requested: record.cancel_requested.load(Ordering::Relaxed),
         }).collect::<Vec<_>>()
     };
     let Ok(bytes) = serde_json::to_vec(&items) else { return; };
@@ -173,6 +182,37 @@ fn cleanup_job_cookies(manager: &DownloadManager, id: &str) {
     } else { None };
     if let Some(path) = path { let _ = std::fs::remove_file(path); }
     persist_records(manager);
+}
+
+fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
+    let (destination, file_path) = match manager.records.lock() {
+        Ok(records) => match records.get(id) {
+            Some(record) => (PathBuf::from(&record.destination), record.file_path.clone()),
+            None => return,
+        },
+        Err(_) => return,
+    };
+
+    if let Some(path) = file_path {
+        let partial = PathBuf::from(format!("{path}.downbest-{id}.tmp"));
+        let _ = std::fs::remove_file(partial);
+    }
+    let parts = destination.join(format!(".downbest-{id}"));
+    let _ = std::fs::remove_dir_all(parts);
+
+    let site_job_suffix = if cfg!(target_os = "android") { id.to_string() } else { id.chars().take(8).collect() };
+    let marker = format!(" - {site_job_suffix}.");
+    if let Ok(entries) = std::fs::read_dir(&destination) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.contains(&marker) {
+                    let path = entry.path();
+                    if path.is_file() { let _ = std::fs::remove_file(path); }
+                    else if path.is_dir() { let _ = std::fs::remove_dir_all(path); }
+                }
+            }
+        }
+    }
 }
 
 fn partial_bytes_for(record: &DownloadRecord) -> u64 {
@@ -342,7 +382,19 @@ fn spawn_download_task(
                 set_status(&manager, &id, "Completed", None);
                 cleanup_job_cookies(&manager, &id);
             },
-            Err(error) if error == "Cancelled" => set_status(&manager, &id, "Paused", None),
+            Err(error) if error == "Cancelled" => {
+                let was_cancelled = manager.records.lock().ok()
+                    .and_then(|records| records.get(&id).map(|record|
+                        record.cancel_requested.load(Ordering::Relaxed)))
+                    .unwrap_or(false);
+                if was_cancelled {
+                    cleanup_cancelled_files(&manager, &id);
+                    set_status(&manager, &id, "Cancelled", None);
+                    cleanup_job_cookies(&manager, &id);
+                } else {
+                    set_status(&manager, &id, "Paused", None);
+                }
+            },
             Err(error) => set_status(&manager, &id, "Failed", Some(error)),
         }
     });
@@ -360,16 +412,20 @@ async fn start_download(
         "auto" | "file" | "audio" | "video" | "video-only" => kind,
         _ => "auto".to_string(),
     };
-    let mobile_default = app.path().app_data_dir().ok().map(|path| path.join("Downloads"));
-    let default_destination = if cfg!(any(target_os = "android", target_os = "ios")) {
-        mobile_default.or_else(|| dirs::document_dir()).unwrap_or_else(std::env::temp_dir)
+    let mobile_default = app.path().app_data_dir().ok()
+        .map(|path| path.join("Downloads").join("DownBest"));
+    let default_base = if cfg!(any(target_os = "android", target_os = "ios")) {
+        mobile_default
     } else {
-        dirs::download_dir().or_else(|| dirs::document_dir()).unwrap_or_else(std::env::temp_dir)
+        dirs::download_dir().or_else(|| dirs::document_dir()).map(|path| path.join("DownBest"))
     };
+    let default_destination = default_base.unwrap_or_else(|| std::env::temp_dir().join("DownBest"));
     let destination_path = match destination {
         Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
         _ => default_destination,
     };
+    std::fs::create_dir_all(&destination_path)
+        .map_err(|error| format!("Cannot create download folder {}: {error}", destination_path.display()))?;
     let id = Uuid::new_v4().simple().to_string();
     let cookies_file = write_job_cookies(&app, &id, cookies)?;
     let requested = concurrency.unwrap_or(2).clamp(1, 8);
@@ -383,6 +439,7 @@ async fn start_download(
         error: None, cancel: cancel.clone(), progress_override: None,
         concurrency: requested, etag: None, last_modified: None,
         cookies_file: cookies_file.clone(),
+        cancel_requested: Arc::new(AtomicBool::new(false)),
     };
     let initial = view_of(&record);
     let manager = manager.inner().clone();
@@ -407,6 +464,7 @@ fn resume_download(
         record.downloaded.store(recovered_bytes, Ordering::Relaxed);
         let cancel = CancellationToken::new();
         record.cancel = cancel.clone();
+        record.cancel_requested.store(false, Ordering::Relaxed);
         record.status = "Queued".into();
         record.error = None;
         record.started = Instant::now();
@@ -451,6 +509,40 @@ async fn pause_download(app: AppHandle, manager: State<'_, DownloadManager>, id:
     let _ = (app, was_media);
     Ok(())
 }
+#[tauri::command]
+async fn cancel_download(app: AppHandle, manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
+    let in_flight = {
+        let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+        let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
+        if matches!(record.status.as_str(), "Completed" | "Failed" | "Cancelled") {
+            return Ok(());
+        }
+        record.cancel_requested.store(true, Ordering::Relaxed);
+        let in_flight = !matches!(record.status.as_str(), "Paused" | "Queued");
+        record.cancel.cancel();
+        record.status = if in_flight { "Cancelling".into() } else { "Cancelled".into() };
+        in_flight
+    };
+    persist_records(manager.inner());
+
+    #[cfg(target_os = "android")]
+    {
+        let handle = app.clone();
+        let job_id = id.clone();
+        let _ = tokio::task::spawn_blocking(move || handle.media().cancel(MediaCancelRequest { job_id }))
+            .await.map_err(|error| format!("Android media cancellation worker failed: {error}"))?;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+
+    if !in_flight {
+        cleanup_cancelled_files(manager.inner(), &id);
+        cleanup_job_cookies(manager.inner(), &id);
+        set_status(manager.inner(), &id, "Cancelled", None);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
     let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
@@ -1447,6 +1539,7 @@ mod lite_mode_tests {
             etag: None,
             last_modified: None,
             cookies_file: None,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1694,7 +1787,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_media::init());
     builder
         .invoke_handler(tauri::generate_handler![
-            start_download, resume_download, get_downloads, pause_download, clear_finished, check_engines, supports_folder_picker, reveal_download
+            start_download, resume_download, get_downloads, pause_download, cancel_download, clear_finished, check_engines, supports_folder_picker, reveal_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running DownBest");
