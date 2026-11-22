@@ -449,8 +449,10 @@ async fn run_media_download(
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let progress_manager = manager.clone();
     let progress_id = id.to_string();
-    let on_progress = tauri::ipc::Channel::new(move |progress: MediaProgress| {
-        set_progress(&progress_manager, &progress_id, progress.progress);
+    let on_progress = tauri::ipc::Channel::new(move |body| {
+        if let Ok(progress) = body.deserialize::<MediaProgress>() {
+            set_progress(&progress_manager, &progress_id, progress.progress);
+        }
         Ok(())
     });
     let request = MediaDownloadRequest {
