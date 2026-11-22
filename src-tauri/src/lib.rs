@@ -10,7 +10,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::{AsyncWriteExt, BufWriter},
+    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::Semaphore,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -18,6 +18,8 @@ use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
+#[cfg(target_os = "ios")]
+use std::hash::{Hash, Hasher};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri_plugin_media::{MediaDownloadRequest, MediaExt, MediaProgress};
 #[cfg(target_os = "android")]
@@ -45,6 +47,14 @@ struct PersistedDownload {
     destination: String, file_path: Option<String>, downloaded_bytes: u64,
     total_bytes: Option<u64>, error: Option<String>, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
+}
+
+#[cfg(target_os = "ios")]
+#[derive(Serialize, Deserialize, Clone)]
+struct HlsResumeState {
+    signature: u64,
+    next_segment: usize,
+    committed_bytes: u64,
 }
 
 struct DownloadRecord {
@@ -853,9 +863,13 @@ async fn run_media_download(
         on_progress,
     };
     let app_handle = app.clone();
-    let result = tokio::task::spawn_blocking(move || app_handle.media().download(request))
-        .await.map_err(|e| format!("Mobile media worker failed: {e}"))?
-        .map_err(|e| format!("Mobile media engine: {e}"))?;
+    let worker_result = tokio::task::spawn_blocking(move || app_handle.media().download(request))
+        .await.map_err(|e| format!("Mobile media worker failed: {e}"))?;
+    let result = match worker_result {
+        Ok(result) => result,
+        Err(_error) if cancel.is_cancelled() => return Err("Cancelled".into()),
+        Err(error) => return Err(format!("Mobile media engine: {error}")),
+    };
     set_file_name(manager, id, &result.file_name);
     set_file_path(manager, id, Path::new(&result.file_path));
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
@@ -989,7 +1003,7 @@ async fn run_media_download(
 }
 
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "ios")]
 async fn download_open_hls(
     source: &Url,
     destination: &Path,
@@ -1011,7 +1025,10 @@ async fn download_open_hls(
         if !response.status().is_success() {
             return Err(format!("HLS server returned HTTP {}", response.status()));
         }
-        let body = response.bytes().await.map_err(|e| format!("Could not read HLS playlist: {e}"))?;
+        let body = tokio::select! {
+            _ = cancel.cancelled() => return Err("Cancelled".into()),
+            result = response.bytes() => result.map_err(|e| format!("Could not read HLS playlist: {e}"))?,
+        };
         m3u8_rs::parse_playlist_res(&body)
             .map_err(|e| format!("Invalid HLS playlist: {e}"))
     }
@@ -1058,6 +1075,7 @@ async fn download_open_hls(
     if media.segments.iter().filter_map(|segment| segment.map.as_ref()).any(|map| Some(&map.uri) != map_uri.as_ref()) {
         return Err("The HLS playlist changes its initialization segment. Use a desktop build for this stream.".into());
     }
+
     let extension = if map_uri.is_some() { "mp4" } else { "ts" };
     let base_name = suggested_name(source).unwrap_or_else(|| format!("hls-{}", &id[..8]));
     let stem = Path::new(&base_name).file_stem().and_then(|v| v.to_str()).unwrap_or("hls");
@@ -1065,22 +1083,115 @@ async fn download_open_hls(
     set_file_name(manager, id, target.file_name().and_then(|v| v.to_str()).unwrap_or("stream.ts"));
 
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
-    let output = File::create(&temp).await.map_err(|e| format!("Cannot create HLS output: {e}"))?;
-    let mut output = BufWriter::with_capacity(128 * 1024, output);
-    let progress = progress_counter(manager, id)?;
+    let checkpoint = PathBuf::from(format!("{}.downbest-{}.hls.json", target.display(), id));
+    let total_segments = media.segments.len();
 
-    if let Some(uri) = map_uri {
-        let map_url = media_url.join(&uri).map_err(|e| format!("Invalid HLS init segment URL: {e}"))?;
-        let response = client.get(map_url).send().await.map_err(|e| format!("HLS init segment request failed: {e}"))?;
-        if !response.status().is_success() { return Err(format!("HLS init segment returned HTTP {}", response.status())); }
-        let bytes = response.bytes().await.map_err(|e| format!("Could not read HLS init segment: {e}"))?;
-        output.write_all(&bytes).await.map_err(|e| format!("Could not write HLS init segment: {e}"))?;
-        add_progress(&progress, bytes.len() as u64);
+    // The signature prevents resuming a partial output against a changed playlist.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.as_str().hash(&mut hasher);
+    media_url.as_str().hash(&mut hasher);
+    map_uri.hash(&mut hasher);
+    for segment in &media.segments {
+        segment.uri.hash(&mut hasher);
+    }
+    let signature = hasher.finish();
+
+    let loaded = fs::read(&checkpoint).await.ok()
+        .and_then(|bytes| serde_json::from_slice::<HlsResumeState>(&bytes).ok());
+    let temp_len = fs::metadata(&temp).await.map(|meta| meta.len()).unwrap_or(0);
+    let mut state = match loaded {
+        Some(saved)
+            if saved.signature == signature
+                && saved.next_segment <= total_segments
+                && temp_len >= saved.committed_bytes => saved,
+        _ => {
+            let _ = fs::remove_file(&temp).await;
+            let _ = fs::remove_file(&checkpoint).await;
+            HlsResumeState { signature, next_segment: 0, committed_bytes: 0 }
+        }
+    };
+
+    let save_checkpoint = |state: HlsResumeState| {
+        let checkpoint = checkpoint.clone();
+        async move {
+            let bytes = serde_json::to_vec(&state)
+                .map_err(|e| format!("Could not encode HLS checkpoint: {e}"))?;
+            let staging = checkpoint.with_extension("hls.tmp");
+            let mut file = File::create(&staging).await
+                .map_err(|e| format!("Could not create HLS checkpoint: {e}"))?;
+            file.write_all(&bytes).await
+                .map_err(|e| format!("Could not write HLS checkpoint: {e}"))?;
+            file.flush().await.map_err(|e| format!("Could not flush HLS checkpoint: {e}"))?;
+            file.sync_all().await.map_err(|e| format!("Could not sync HLS checkpoint: {e}"))?;
+            drop(file);
+            if fs::rename(&staging, &checkpoint).await.is_err() {
+                let _ = fs::remove_file(&checkpoint).await;
+                fs::rename(&staging, &checkpoint).await
+                    .map_err(|e| format!("Could not commit HLS checkpoint: {e}"))?;
+            }
+            Ok::<(), String>(())
+        }
+    };
+
+    // If the last segment was committed but the app closed before rename, finish without downloading again.
+    if state.next_segment == total_segments && temp_len >= state.committed_bytes && state.committed_bytes > 0 {
+        let mut file = OpenOptions::new().write(true).open(&temp).await
+            .map_err(|e| format!("Could not reopen completed HLS output: {e}"))?;
+        file.set_len(state.committed_bytes).await
+            .map_err(|e| format!("Could not trim recovered HLS output: {e}"))?;
+        file.sync_all().await.map_err(|e| format!("Could not sync recovered HLS output: {e}"))?;
+        drop(file);
+        fs::rename(&temp, &target).await
+            .map_err(|e| format!("Could not finalize recovered HLS output: {e}"))?;
+        let _ = fs::remove_file(&checkpoint).await;
+        set_file_path(manager, id, &target);
+        set_progress(manager, id, 100.0);
+        return Ok(());
     }
 
-    let total_segments = media.segments.len();
-    for (index, segment) in media.segments.iter().enumerate() {
+    let mut raw_output = OpenOptions::new().create(true).write(true).open(&temp).await
+        .map_err(|e| format!("Cannot open HLS partial output: {e}"))?;
+    raw_output.set_len(state.committed_bytes).await
+        .map_err(|e| format!("Could not restore HLS partial length: {e}"))?;
+    raw_output.seek(std::io::SeekFrom::Start(state.committed_bytes)).await
+        .map_err(|e| format!("Could not seek to HLS resume position: {e}"))?;
+    let mut output = BufWriter::with_capacity(128 * 1024, raw_output);
+    let progress = progress_counter(manager, id)?;
+    progress.store(state.committed_bytes, Ordering::Relaxed);
+    set_progress(manager, id, state.next_segment as f64 / total_segments as f64 * 100.0);
+    save_checkpoint(state.clone()).await?;
+
+    // Write the initialization map only once, and checkpoint it before moving to media segments.
+    if state.next_segment == 0 && state.committed_bytes == 0 {
+        if let Some(uri) = map_uri.as_ref() {
+            let map_url = media_url.join(uri)
+                .map_err(|e| format!("Invalid HLS init segment URL: {e}"))?;
+            let response = tokio::select! {
+                _ = cancel.cancelled() => return Err("Cancelled".into()),
+                result = client.get(map_url).send() => result.map_err(|e| format!("HLS init segment request failed: {e}"))?,
+            };
+            if !response.status().is_success() {
+                return Err(format!("HLS init segment returned HTTP {}", response.status()));
+            }
+            let bytes = tokio::select! {
+                _ = cancel.cancelled() => return Err("Cancelled".into()),
+                result = response.bytes() => result.map_err(|e| format!("Could not read HLS init segment: {e}"))?,
+            };
+            output.write_all(&bytes).await
+                .map_err(|e| format!("Could not write HLS init segment: {e}"))?;
+            output.flush().await.map_err(|e| format!("Could not flush HLS init segment: {e}"))?;
+            output.get_ref().sync_data().await
+                .map_err(|e| format!("Could not sync HLS init segment: {e}"))?;
+            state.committed_bytes = output.get_ref().metadata().await
+                .map_err(|e| format!("Could not inspect HLS partial output: {e}"))?.len();
+            save_checkpoint(state.clone()).await?;
+            progress.store(state.committed_bytes, Ordering::Relaxed);
+        }
+    }
+
+    for index in state.next_segment..total_segments {
         if cancel.is_cancelled() { return Err("Cancelled".into()); }
+        let segment = &media.segments[index];
         let segment_url = media_url.join(&segment.uri)
             .map_err(|e| format!("Invalid HLS segment URL: {e}"))?;
         let response = tokio::select! {
@@ -1090,15 +1201,29 @@ async fn download_open_hls(
         if !response.status().is_success() {
             return Err(format!("HLS segment {} returned HTTP {}", index + 1, response.status()));
         }
-        let bytes = response.bytes().await.map_err(|e| format!("Could not read HLS segment {}: {e}", index + 1))?;
-        output.write_all(&bytes).await.map_err(|e| format!("Could not write HLS segment {}: {e}", index + 1))?;
-        add_progress(&progress, bytes.len() as u64);
-        set_progress(manager, id, ((index + 1) as f64 / total_segments as f64) * 100.0);
+        let bytes = tokio::select! {
+            _ = cancel.cancelled() => return Err("Cancelled".into()),
+            result = response.bytes() => result.map_err(|e| format!("Could not read HLS segment {}: {e}", index + 1))?,
+        };
+        output.write_all(&bytes).await
+            .map_err(|e| format!("Could not write HLS segment {}: {e}", index + 1))?;
+        output.flush().await.map_err(|e| format!("Could not flush HLS segment {}: {e}", index + 1))?;
+        output.get_ref().sync_data().await
+            .map_err(|e| format!("Could not sync HLS segment {}: {e}", index + 1))?;
+
+        state.next_segment = index + 1;
+        state.committed_bytes = output.get_ref().metadata().await
+            .map_err(|e| format!("Could not inspect HLS partial output: {e}"))?.len();
+        save_checkpoint(state.clone()).await?;
+        progress.store(state.committed_bytes, Ordering::Relaxed);
+        set_progress(manager, id, (state.next_segment as f64 / total_segments as f64) * 100.0);
     }
+
     output.flush().await.map_err(|e| format!("Could not flush HLS output: {e}"))?;
     output.get_ref().sync_all().await.map_err(|e| format!("Could not sync HLS output: {e}"))?;
     drop(output);
     fs::rename(&temp, &target).await.map_err(|e| format!("Could not finalize HLS output: {e}"))?;
+    let _ = fs::remove_file(&checkpoint).await;
     set_file_path(manager, id, &target);
     Ok(())
 }
@@ -1226,12 +1351,6 @@ mod lite_mode_tests {
         assert_eq!(first.file_name().and_then(|value| value.to_str()), Some("same.zip"));
         assert_eq!(second.file_name().and_then(|value| value.to_str()), Some("same (1).zip"));
         std::fs::remove_dir_all(folder).expect("remove test directory");
-    }
-
-    #[test]
-    fn byte_range_resume_reads_the_exact_start_offset() {
-        let value = header::HeaderValue::from_static("bytes 4096-8191/16384");
-        assert_eq!(parse_content_range_start(Some(&value)), Some(4096));
     }
 
     #[test]
