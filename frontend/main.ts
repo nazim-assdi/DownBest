@@ -325,7 +325,6 @@ clearCookies.addEventListener("click", () => {
   toast("Imported site cookies cleared.");
 });
 
-document.querySelector<HTMLButtonElement>("#download-list")?.addEventListener("click", () => {});
 document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {
   event.preventDefault();
   if (busy) return;
