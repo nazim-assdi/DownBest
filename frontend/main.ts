@@ -85,9 +85,9 @@ root.innerHTML = [
   '<form id="download-form"><div class="url-label-row"><label for="urls">DOWNLOAD LINKS</label><span id="url-count">0 links detected</span></div><div class="urlbox"><span>' + icons.link + '</span><textarea id="urls" rows="3" placeholder="https://example.com/file-one.zip&#10;https://example.com/file-two.mp4" required></textarea></div>',
   '<div class="fields"><div><label for="kind">CONTENT TYPE</label><select id="kind"><option value="auto">Auto detect</option><option value="file">Direct file</option><option value="audio">Audio only</option><option value="video">Video + audio</option><option value="video-only">Video only</option></select></div>',
   '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2" selected>Lite · Low CPU</option><option value="4">Balanced · 4 connections</option><option value="8">High throughput · 8 connections</option></select></div>',
-  '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default Downloads folder"><button id="choose-folder" type="button">Browse</button></div></div></div>',
+  '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default: Downloads/DownBest"><button id="choose-folder" type="button">Browse</button></div></div></div>',
   '<div class="cookie-import"><div><label>SITE LOGIN COOKIES · OPTIONAL</label><p>For videos that need sign-in, import your own Netscape-format cookies.txt. Never enter your password here.</p></div><div class="cookie-actions"><input id="cookies-file" type="file" accept=".txt,.cookies,text/plain" hidden><button id="import-cookies" type="button">Import cookies.txt</button><span id="cookies-name">No cookies imported</span><button id="clear-cookies" type="button" disabled>Clear</button></div></div>',
-  '<div class="composer-bottom"><p class="note">Pause safely at any time. DownBest saves your queue and resumes partial downloads after restart.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
+  '<div class="composer-bottom"><p class="note">Default folder: Downloads/DownBest. Pause keeps partial data for resume; Cancel removes incomplete files.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
   '<section class="engine-strip"><div class="engine-title"><span class="eyebrow">DOWNLOAD ENGINES</span><b>Ready for your links</b></div><div id="engine-list"><span class="engine-loading">Checking installed tools…</span></div></section>',
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
@@ -165,7 +165,7 @@ function renderDownloads() {
       d.status === "Downloading" ? "Starting transfer…" : "Preparing…";
     const detail = failedItem ? safe(d.error || "Download failed · you can resume this item") :
       paused ? "Paused · " + sizeDetail + " saved. Resume whenever you are ready." :
-      cancelled ? "Download paused" :
+      cancelled ? "Cancelled · incomplete files removed" :
       done ? "Saved successfully" :
       queued ? "Waiting in queue · starts automatically" :
       d.downloaded_bytes > 0 ? sizeDetail + " · " + speed + eta : speed;
@@ -178,7 +178,9 @@ function renderDownloads() {
         : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
       : "";
     const action = !finalStatus(d.status)
-      ? '<button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button>'
+      ? d.status === "Cancelling" || d.status === "Pausing"
+        ? '<span class="stopping-label">' + (d.status === "Cancelling" ? "Cancelling…" : "Pausing…") + '</span>'
+        : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel and delete incomplete files">Cancel</button></div>'
       : done && d.file_path && desktopFileActions
         ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
         : paused || failedItem || cancelled
@@ -394,6 +396,20 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
       toast("Pausing safely · partial data will be kept.");
       await refreshDownloads();
     } catch (error) { toast(String(error), true); }
+    return;
+  }
+  const cancel = target.closest<HTMLButtonElement>("[data-cancel]");
+  if (cancel) {
+    cancel.disabled = true;
+    try {
+      await invoke("cancel_download", { id: cancel.dataset.cancel });
+      toast("Download cancelled · incomplete files will be removed.");
+      await refreshDownloads();
+      scheduleRefresh(100);
+    } catch (error) {
+      cancel.disabled = false;
+      toast(String(error), true);
+    }
     return;
   }
   const resume = target.closest<HTMLButtonElement>("[data-resume]");
