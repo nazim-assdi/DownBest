@@ -514,3 +514,14 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 :root[data-theme="light"] .cookie-import label,:root[data-theme="light"] .cookie-import p,:root[data-theme="light"] .cookie-actions span{color:#65745f}
 :root[data-theme="light"] .cookie-actions button{background:#f8f7ee;border-color:#aab49e;color:#465b43}
 @media(max-width:650px){.cookie-import{align-items:flex-start;flex-direction:column}.cookie-actions{width:100%}.cookie-actions span{max-width:100%;flex:1}}
+
+
+/* Per-download cancel and pause actions */
+.download-actions{display:flex;align-items:center;gap:7px;flex-shrink:0}
+.cancel-button{display:inline-flex;align-items:center;justify-content:center;min-width:70px;padding:8px 11px;border:1px solid #b66e704d;border-radius:10px;background:#b66e7017;color:#d99092;font:inherit;font-size:12px;font-weight:750;white-space:nowrap;cursor:pointer;opacity:.9}
+.cancel-button:hover{background:#b66e7030;border-color:#d99092;opacity:1}
+.cancel-button:disabled{opacity:.45;cursor:wait}
+.stopping-label{min-width:88px;color:var(--muted);font-size:11px;font-weight:700;text-align:center;white-space:nowrap}
+:root[data-theme="light"] .cancel-button{background:#fae9e7;border-color:#dcb4af;color:#985552}
+:root[data-theme="light"] .cancel-button:hover{background:#f4deda;border-color:#b77870}
+@media(max-width:520px){.download-actions{gap:5px}.pause-button,.cancel-button{min-width:58px;padding:7px 8px;font-size:11px}.stopping-label{min-width:72px}}
