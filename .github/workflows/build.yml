@@ -80,7 +80,7 @@ jobs:
           chmod +x "$tools/yt-dlp"
           sudo apt-get install -y aria2 patchelf
           cp "$(command -v aria2c)" "$tools/aria2c"
-          ldd "$tools/aria2c" | awk '/=> \\// {print $3} /^\\// {print $1}' | sort -u | while read -r dep; do
+          ldd "$tools/aria2c" | tr ' ' '\n' | grep -E '/.*\\.so' | sort -u | while read -r dep; do
             base="$(basename "$dep")"
             case "$base" in libc.so*|libm.so*|libpthread.so*|librt.so*|libdl.so*|ld-linux*) continue ;; esac
             if [ -f "$dep" ]; then cp -L "$dep" "$tools/lib/$base"; fi
@@ -155,7 +155,7 @@ jobs:
           packages: platform-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android,x86_64-linux-android
       - name: Install Android SDK packages
         run: |
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018"
