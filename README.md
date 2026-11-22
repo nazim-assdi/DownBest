@@ -27,8 +27,8 @@ DownBest combines a native async HTTP/HTTPS engine with desktop media extraction
 | Windows | EXE / MSI | Direct HTTP(S) and desktop media extractors |
 | macOS | DMG / APP | Direct HTTP(S) and desktop media extractors |
 | Linux | AppImage / DEB / RPM | Direct HTTP(S) and desktop media extractors |
-| Android | APK | Direct HTTP(S) file links |
-| iOS | IPA | Direct HTTP(S) file links; Apple signing is required |
+| Android | APK (ARM64 / x86_64) | Direct HTTP(S) and supported yt-dlp media sites |
+| iOS | IPA | Direct HTTP(S) and open, unencrypted VOD HLS; Apple signing is required |
 
 **Mobile limits:** Android bundles yt-dlp and FFmpegKit, so supported media-site extraction works without separate installations. The Android yt-dlp runtime is compiled for ARM64 and x86_64; it does not include 32-bit ABIs. iOS uses its native open-HLS saver only for finite, unencrypted VOD playlists; generic third-party site extraction is not enabled in the App Store build. Both platforms also support direct downloadable HTTP/HTTPS file URLs. The default mobile save path is inside the app's private storage. Exporting files into the public Downloads folder needs a native file-export / Storage Access Framework workflow and is not yet implemented.
 
