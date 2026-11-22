@@ -105,7 +105,7 @@ jobs:
           mkdir -p "$tools/lib"
           curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o "$tools/yt-dlp"
           chmod +x "$tools/yt-dlp"
-          brew install aria2 dylibbundler
+          brew install nasm aria2 dylibbundler
           cp "$(brew --prefix aria2)/bin/aria2c" "$tools/aria2c"
           dylibbundler -b -x "$tools/aria2c" -d "$tools/lib" -p @executable_path/lib
           curl -fsSL "https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz" -o "$RUNNER_TEMP/ffmpeg-9.1.tar.xz"
