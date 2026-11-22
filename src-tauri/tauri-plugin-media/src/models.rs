@@ -15,6 +15,7 @@ pub struct MediaDownloadRequest {
 #[serde(rename_all = "camelCase")]
 pub struct MediaProgress {
     pub progress: f64,
+    #[serde(default)]
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub eta_seconds: Option<u64>,
