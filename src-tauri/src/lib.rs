@@ -938,6 +938,7 @@ async fn reveal_download(manager: State<'_, DownloadManager>, id: String) -> Res
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(DownloadManager::default());
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_media::init());
