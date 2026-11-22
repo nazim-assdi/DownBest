@@ -1399,11 +1399,33 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::{download_http, effective_segment_count, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
+    use super::{download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
     use reqwest::{header, Client};
     use std::{io::{Read, Write}, net::TcpListener, path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
+
+    #[test]
+    fn common_social_video_urls_use_the_media_extractor() {
+        for raw in [
+            "https://www.facebook.com/watch/?v=123",
+            "https://m.facebook.com/reel/123",
+            "https://fb.watch/abc123/",
+            "https://www.instagram.com/reel/ABC123/",
+            "https://instagr.am/p/ABC123/",
+            "https://www.threads.net/@creator/post/123",
+            "https://clips.twitch.tv/example",
+        ] {
+            let parsed = url::Url::parse(raw).expect("valid social media URL");
+            assert!(needs_media_extractor(&parsed), "{raw} should use yt-dlp");
+        }
+    }
+
+    #[test]
+    fn unrelated_download_hosts_are_not_forced_to_media_extractor() {
+        let parsed = url::Url::parse("https://downloads.example.org/file.zip").unwrap();
+        assert!(!needs_media_extractor(&parsed));
+    }
 
     fn queued_record(id: &str) -> DownloadRecord {
         DownloadRecord {
