@@ -23,8 +23,9 @@ let downloads: Download[] = [];
 let desktopFileActions = false;
 let filter = "all";
 let busy = false;
-let cookiesText: string | null = null;
 let pollTimer: number | undefined;
+const liveSamples = new Map<string, { bytes: number; at: number }>();
+const liveSpeeds = new Map<string, number>();
 
 const icons: Record<string, string> = {
   download: '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>',
@@ -85,9 +86,8 @@ root.innerHTML = [
   '<form id="download-form"><div class="url-label-row"><label for="urls">DOWNLOAD LINKS</label><span id="url-count">0 links detected</span></div><div class="urlbox"><span>' + icons.link + '</span><textarea id="urls" rows="3" placeholder="https://example.com/file-one.zip&#10;https://example.com/file-two.mp4" required></textarea></div>',
   '<div class="fields"><div><label for="kind">CONTENT TYPE</label><select id="kind"><option value="auto">Auto detect</option><option value="file">Direct file</option><option value="audio">Audio only</option><option value="video">Video + audio</option><option value="video-only">Video only</option></select></div>',
   '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2" selected>Lite · Low CPU</option><option value="4">Balanced · 4 connections</option><option value="8">High throughput · 8 connections</option></select></div>',
-  '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default: Downloads/DownBest"><button id="choose-folder" type="button">Browse</button></div></div></div>',
-  '<div class="cookie-import"><div><label>SITE LOGIN COOKIES · OPTIONAL</label><p>For videos that need sign-in, import your own Netscape-format cookies.txt. Never enter your password here.</p></div><div class="cookie-actions"><input id="cookies-file" type="file" accept=".txt,.cookies,text/plain" hidden><button id="import-cookies" type="button">Import cookies.txt</button><span id="cookies-name">No cookies imported</span><button id="clear-cookies" type="button" disabled>Clear</button></div></div>',
-  '<div class="composer-bottom"><p class="note">Default folder: Downloads/DownBest. Pause keeps partial data for resume; Cancel removes incomplete files.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
+  '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default: System Downloads"><button id="choose-folder" type="button">Browse</button></div></div></div>',
+  '<div class="composer-bottom"><p class="note" id="save-location-note">Default save location: System Downloads. Resume is manual; Cancel removes incomplete files.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
   '<section class="engine-strip"><div class="engine-title"><span class="eyebrow">DOWNLOAD ENGINES</span><b>Ready for your links</b></div><div id="engine-list"><span class="engine-loading">Checking installed tools…</span></div></section>',
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
@@ -155,44 +155,85 @@ function renderDownloads() {
     const sizeDetail = d.total_bytes
       ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
       : bytes(d.downloaded_bytes) + " downloaded";
-    const eta = d.total_bytes && d.speed_bytes_sec > 0
-      ? " · " + formatTime((d.total_bytes - d.downloaded_bytes) / d.speed_bytes_sec) + " left"
+    const measuredSpeed = liveSpeeds.get(d.id) || d.speed_bytes_sec;
+    const eta = d.total_bytes && measuredSpeed > 0
+      ? " · " + formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed) + " left"
       : "";
-    const speed = d.speed_bytes_sec > 0 ? bytes(d.speed_bytes_sec) + "/s" :
+    const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" :
       queued ? "Waiting for a free slot" :
       d.status === "Connecting" ? "Contacting site…" :
       d.status === "Extracting media" ? "Finding media formats…" :
-      d.status === "Downloading" ? "Starting transfer…" : "Preparing…";
-    const detail = failedItem ? safe(d.error || "Download failed · you can resume this item") :
-      paused ? "Paused · " + sizeDetail + " saved. Resume whenever you are ready." :
+      d.status === "Downloading" ? "Receiving data…" : "Preparing…";
+    const detail = failedItem ? safe(d.error || "Download failed · press Resume to retry") :
+      paused ? "Paused · " + sizeDetail + " saved. Press Resume to continue." :
       cancelled ? "Cancelled · incomplete files removed" :
       done ? "Saved successfully" :
       queued ? "Waiting in queue · starts automatically" :
-      d.downloaded_bytes > 0 ? sizeDetail + " · " + speed + eta : speed;
+      d.downloaded_bytes > 0 ? sizeDetail + eta : speed;
+    const unknownLength = !d.total_bytes && pct <= 0 && !done;
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
-      (d.status === "Downloading" && d.downloaded_bytes === 0) ? "indeterminate" : "";
+      (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
+    const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
+      d.status === "Downloading" ? "LIVE" : "—";
     const bar = done ? 100 : pct;
+    const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const output = done && d.file_path
-      ? desktopFileActions
-        ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
-        : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
+      ? isPublicMobileFile
+        ? '<div class="output-path"><span>' + icons.folder + '</span><span>Saved to your phone’s Downloads folder</span></div>'
+        : desktopFileActions
+          ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
+          : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
       : "";
     const action = !finalStatus(d.status)
       ? d.status === "Cancelling" || d.status === "Pausing"
         ? '<span class="stopping-label">' + (d.status === "Cancelling" ? "Cancelling…" : "Pausing…") + '</span>'
         : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel and delete incomplete files">Cancel</button></div>'
-      : done && d.file_path && desktopFileActions
-        ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
-        : paused || failedItem
-          ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
-          : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
-    return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><div class="download-meta"><span>' + (done ? "100% complete" : pct.toFixed(1) + "%") + ' <em>·</em> ' + safe(d.kind.toUpperCase()) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
+      : isPublicMobileFile
+        ? '<button class="open-button" data-open="' + safe(d.id) + '">' + icons.external + '<span>Open file</span></button>'
+        : done && d.file_path && desktopFileActions
+          ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
+          : paused || failedItem
+            ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
+            : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
+    return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div><div class="download-meta"><span>' + (done ? "100% complete" : safe(d.kind.toUpperCase())) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
   }).join("");
+}
+
+function updateLiveSpeedSamples(next: Download[]) {
+  const now = performance.now();
+  const activeIds = new Set<string>();
+  for (const item of next) {
+    if (!["Downloading", "Extracting media"].includes(item.status)) {
+      liveSamples.delete(item.id);
+      liveSpeeds.delete(item.id);
+      continue;
+    }
+    activeIds.add(item.id);
+    const previous = liveSamples.get(item.id);
+    if (previous && now > previous.at && item.downloaded_bytes >= previous.bytes) {
+      const instant = (item.downloaded_bytes - previous.bytes) * 1000 / (now - previous.at);
+      if (instant > 0) {
+        const old = liveSpeeds.get(item.id) || instant;
+        liveSpeeds.set(item.id, Math.round(old * 0.35 + instant * 0.65));
+      }
+    } else {
+      liveSpeeds.delete(item.id);
+    }
+    liveSamples.set(item.id, { bytes: item.downloaded_bytes, at: now });
+  }
+  for (const id of [...liveSamples.keys()]) {
+    if (!activeIds.has(id) && !next.some(item => item.id === id && ["Connecting", "Queued"].includes(item.status))) {
+      liveSamples.delete(id);
+      liveSpeeds.delete(id);
+    }
+  }
 }
 
 async function refreshDownloads() {
   try {
-    downloads = await invoke<Download[]>("get_downloads");
+    const next = await invoke<Download[]>("get_downloads");
+    updateLiveSpeedSamples(next);
+    downloads = next;
     renderDownloads();
   } catch (error) {
     document.querySelector("#engine-state")!.textContent = "Connection issue";
@@ -211,7 +252,7 @@ function scheduleRefresh(delay?: number) {
   pollTimer = window.setTimeout(async () => {
     if (!document.hidden) await refreshDownloads();
     const active = downloads.some(d => !finalStatus(d.status));
-    scheduleRefresh(document.hidden ? 2500 : active ? 650 : 2200);
+    scheduleRefresh(document.hidden ? 2500 : active ? 500 : 2200);
   }, delay === undefined ? 300 : delay);
 }
 type Theme = "eye" | "dark" | "light";
@@ -291,46 +332,7 @@ function updateUrlCount() {
 
 document.querySelector<HTMLTextAreaElement>("#urls")!.addEventListener("input", updateUrlCount);
 
-const cookiesInput = document.querySelector<HTMLInputElement>("#cookies-file")!;
-const cookiesName = document.querySelector<HTMLElement>("#cookies-name")!;
-const clearCookies = document.querySelector<HTMLButtonElement>("#clear-cookies")!;
-document.querySelector<HTMLButtonElement>("#import-cookies")!.addEventListener("click", () => cookiesInput.click());
-cookiesInput.addEventListener("change", async () => {
-  const file = cookiesInput.files?.[0];
-  if (!file) return;
-  if (file.size > 4 * 1024 * 1024) {
-    cookiesInput.value = "";
-    toast("cookies.txt must be 4 MiB or smaller.", true);
-    return;
-  }
-  try {
-    const contents = await file.text();
-    const hasCookieRows = contents.split(/\r?\n/).some(line => {
-      const row = line.startsWith("#HttpOnly_") ? line.slice("#HttpOnly_".length) : line;
-      return row.trim() && !row.startsWith("#") && row.split("\t").length >= 7;
-    });
-    if (!hasCookieRows) throw new Error("Choose a Netscape-format cookies.txt export.");
-    cookiesText = contents;
-    cookiesName.textContent = file.name;
-    clearCookies.disabled = false;
-    toast("Site cookies imported securely for this session.");
-  } catch (error) {
-    cookiesText = null;
-    cookiesInput.value = "";
-    cookiesName.textContent = "No cookies imported";
-    clearCookies.disabled = true;
-    toast(String(error), true);
-  }
-});
-clearCookies.addEventListener("click", () => {
-  cookiesText = null;
-  cookiesInput.value = "";
-  cookiesName.textContent = "No cookies imported";
-  clearCookies.disabled = true;
-  toast("Imported site cookies cleared.");
-});
-
-document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {
+document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("submit", async event => {
   event.preventDefault();
   if (busy) return;
   const urls = document.querySelector<HTMLTextAreaElement>("#urls")!.value
@@ -346,7 +348,7 @@ document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("sub
   button.innerHTML = '<span class="spinner"></span><b>Adding ' + urls.length + ' links…</b>';
   try {
     const results = await Promise.allSettled(urls.map(url =>
-      invoke("start_download", { url, kind, destination: destination || null, concurrency, cookies: cookiesText })
+      invoke("start_download", { url, kind, destination: destination || null, concurrency })
     ));
     const added = results.filter(result => result.status === "fulfilled").length;
     const rejected = results.length - added;
@@ -422,6 +424,13 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
     } catch (error) { toast(String(error), true); }
     return;
   }
+  const openFile = target.closest<HTMLButtonElement>("[data-open]");
+  if (openFile) {
+    try {
+      await invoke("open_download", { id: openFile.dataset.open });
+    } catch (error) { toast(String(error), true); }
+    return;
+  }
   const reveal = target.closest<HTMLButtonElement>("[data-reveal]");
   if (reveal) {
     try {
@@ -460,11 +469,15 @@ document.addEventListener("visibilitychange", () => {
 void Promise.all([
   refreshDownloads(),
   refreshTools(),
+  invoke<string>("default_save_location").then(location => {
+    const note = document.querySelector<HTMLElement>("#save-location-note");
+    if (note) note.textContent = location + " Pause keeps partial data. Resume only starts when you press it; Cancel deletes unfinished files.";
+  }).catch(() => {}),
   invoke<boolean>("supports_folder_picker").then(supported => {
     desktopFileActions = supported;
     if (!supported) {
-      const button = document.querySelector<HTMLButtonElement>("#choose-folder");
-      if (button) button.hidden = true;
+      const destinationField = document.querySelector<HTMLElement>(".destination");
+      if (destinationField) destinationField.hidden = true;
     }
     renderDownloads();
   }).catch(() => {})

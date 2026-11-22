@@ -23,7 +23,7 @@ use std::hash::{Hash, Hasher};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri_plugin_media::{MediaDownloadRequest, MediaExt, MediaProgress};
 #[cfg(target_os = "android")]
-use tauri_plugin_media::MediaCancelRequest;
+use tauri_plugin_media::{MediaCancelRequest, MediaOpenRequest, MediaPublishRequest};
 
 #[derive(Clone)]
 struct DownloadManager {
@@ -386,8 +386,18 @@ fn spawn_download_task(
                 }
             }
         });
-        let result = execute_download(app, manager.clone(), id.clone(), url, kind,
+        #[cfg(target_os = "android")]
+        let publish_app = app.clone();
+        let download_result = execute_download(app, manager.clone(), id.clone(), url, kind,
             destination, concurrency, cookies_file, cancel.clone()).await;
+        #[cfg(target_os = "android")]
+        let result = if download_result.is_ok() {
+            publish_completed_download(&publish_app, &manager, &id).await
+        } else {
+            download_result
+        };
+        #[cfg(not(target_os = "android"))]
+        let result = download_result;
         cancel.cancel();
         let _ = saver.await;
         match result {
@@ -428,15 +438,15 @@ async fn start_download(
         "auto" | "file" | "audio" | "video" | "video-only" => kind,
         _ => "auto".to_string(),
     };
-    let app_download_folder = app.path().download_dir().ok().map(|path| path.join("DownBest"));
-    let default_base = app_download_folder.or_else(|| {
-        if cfg!(any(target_os = "android", target_os = "ios")) {
-            app.path().app_data_dir().ok().map(|path| path.join("Downloads").join("DownBest"))
-        } else {
-            dirs::download_dir().or_else(|| dirs::document_dir()).map(|path| path.join("DownBest"))
-        }
-    });
-    let default_destination = default_base.unwrap_or_else(|| std::env::temp_dir().join("DownBest"));
+    let default_base = {
+        #[cfg(target_os = "android")]
+        { app.path().app_data_dir().ok().map(|path| path.join("download-staging")) }
+        #[cfg(target_os = "ios")]
+        { app.path().app_data_dir().ok().map(|path| path.join("Downloads")) }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        { dirs::download_dir() }
+    };
+    let default_destination = default_base.unwrap_or_else(|| std::env::temp_dir().join("Downloads"));
     let destination_path = match destination {
         Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
         _ => default_destination,
@@ -1076,6 +1086,76 @@ async fn run_media_download(
         return Err("The Android extractor reported success but the output file is missing.".into());
     }
     Ok(())
+}
+
+
+#[cfg(target_os = "android")]
+async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, id: &str) -> Result<(), String> {
+    let source_path = {
+        let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+        records.get(id).and_then(|record| record.file_path.clone())
+            .ok_or_else(|| "The completed download has no output file to publish.".to_string())?
+    };
+    if !Path::new(&source_path).is_file() {
+        return Err("The finished file is missing before it could be copied to Downloads.".into());
+    }
+    let handle = app.clone();
+    let published = tokio::task::spawn_blocking(move || {
+        handle.media().publish_download(MediaPublishRequest { file_path: source_path })
+    }).await.map_err(|error| format!("Android Downloads worker failed: {error}"))?
+        .map_err(|error| format!("Could not publish the finished file to Downloads: {error}"))?;
+    if !published.content_uri.starts_with("content://") {
+        return Err("Android returned an invalid public file location.".into());
+    }
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            record.file_name = published.file_name;
+            record.file_path = Some(published.content_uri);
+            record.destination = "Downloads".into();
+        }
+    }
+    persist_records(manager);
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_download(
+    app: AppHandle,
+    manager: State<'_, DownloadManager>,
+    id: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "android")]
+    {
+        let content_uri = {
+            let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+            records.get(&id).and_then(|record| record.file_path.clone())
+                .ok_or_else(|| "The saved file location is unavailable.".to_string())?
+        };
+        if !content_uri.starts_with("content://") {
+            return Err("This item is not saved in the public Downloads folder.".into());
+        }
+        let handle = app.clone();
+        tokio::task::spawn_blocking(move || {
+            handle.media().open_download(MediaOpenRequest { content_uri })
+        }).await.map_err(|error| format!("Android file opener failed: {error}"))?
+            .map_err(|error| format!("Could not open the downloaded file: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, manager, id);
+        Err("Opening a public Downloads file is only supported on Android.".into())
+    }
+}
+
+#[tauri::command]
+fn default_save_location() -> &'static str {
+    #[cfg(target_os = "android")]
+    { "Finished files are saved directly in your phone's Downloads folder." }
+    #[cfg(target_os = "ios")]
+    { "Files stay inside the app's private storage on iOS." }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    { "Files are saved in your system Downloads folder by default." }
 }
 
 #[cfg(target_os = "ios")]
@@ -1863,7 +1943,8 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_media::init());
     builder
         .invoke_handler(tauri::generate_handler![
-            start_download, resume_download, get_downloads, pause_download, cancel_download, clear_finished, check_engines, supports_folder_picker, reveal_download
+            start_download, resume_download, get_downloads, pause_download, cancel_download, clear_finished,
+            check_engines, supports_folder_picker, default_save_location, reveal_download, open_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running DownBest");

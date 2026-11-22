@@ -21,7 +21,7 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - yt-dlp concurrent fragment downloads; bundled aria2c is used for HTTP/FTP transfers while its native downloader remains selected for DASH/HLS.
 - Bundled FFmpeg is used by yt-dlp to merge separate audio and video streams.
 - Desktop users can choose the save folder with the native folder picker and reveal completed files in the system file manager. The default folder is Downloads.
-- App-specific private storage is used as the default destination on Android/iOS; the desktop folder picker is not shown on mobile.
+- Desktop downloads default directly to the operating system Downloads directory, without a DownBest subfolder. Android uses private staging during a transfer, then publishes completed files into the shared system Downloads collection through MediaStore. iOS retains app-private storage.
 - Persistent download queue stored in the app-data folder; unfinished jobs return as Paused after an app/PC restart and can be resumed from the queue.
 - Direct HTTP(S) downloads keep durable partial files, validate byte-range offsets, use ETag/Last-Modified validators when available, and sync partial data to disk periodically.
 - Desktop yt-dlp downloads use a stable per-job output template, `--continue`, `--part` and `--keep-fragments`; resumable fragments are retained when yt-dlp and the source extractor support them.
@@ -38,7 +38,7 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 | Android | APK (ARM64 / x86_64) | Direct HTTP(S) and supported yt-dlp media sites |
 | iOS | IPA | Direct HTTP(S) and open, unencrypted VOD HLS; Apple signing is required |
 
-**Mobile limits:** Android bundles yt-dlp and FFmpegKit, so supported media-site extraction works without separate installations. The Android yt-dlp runtime is compiled for ARM64 and x86_64; it does not include 32-bit ABIs. iOS uses its native open-HLS saver only for finite, unencrypted VOD playlists; generic third-party site extraction is not enabled in the App Store build. Both platforms also support direct downloadable HTTP/HTTPS file URLs. The default mobile save path is inside the app's private storage. Exporting files into the public Downloads folder needs a native file-export / Storage Access Framework workflow and is not yet implemented.
+**Mobile limits:** Android bundles yt-dlp and FFmpegKit, so supported media-site extraction works without separate installations. The Android yt-dlp runtime is compiled for ARM64 and x86_64; it does not include 32-bit ABIs. Finished Android files are copied into the shared Downloads folder through MediaStore on Android 10 and later; incomplete transfer data remains in app-private staging to preserve Pause/Resume. iOS uses its native open-HLS saver only for finite, unencrypted VOD playlists; generic third-party site extraction is not enabled in the App Store build, and its files remain in app-private storage.
 
 yt-dlp supports many extractors, but no application can guarantee that every website, DRM-protected stream, login-gated media item or regional restriction will work. DownBest does not bypass DRM, authentication, access controls or source-server rate limits.
 
@@ -112,7 +112,7 @@ The queue is saved locally in the application's data directory. Running or queue
 
 ## Download location and cancellation
 
-When no custom save folder is selected, DownBest creates and uses a `DownBest` subfolder inside the platform download directory. Desktop builds use the user's Downloads folder (for example, `Downloads/DownBest`). On Android and iOS, Tauri resolves user directories inside the app sandbox; the mobile default is therefore app-specific and is removed when the app is uninstalled. Selecting Browse continues to use the folder chosen by the user.
+When no custom save folder is selected, desktop builds save directly to the operating system Downloads directory; no extra `DownBest` folder is created. On Android, transfers run in private staging and completed files are then published to the shared system `Download` directory through Android MediaStore, so normal file managers and the Downloads app can find them. This public-folder publishing path requires Android 10 or later. iOS continues to keep files in the app's private storage area.
 
 Active jobs offer two separate stop actions. Pause preserves the HTTP range parts or extractor partial files and lets the job resume later. Cancel stops the job permanently, removes its incomplete HTTP/segment/extractor files, and records a terminal Cancelled state. Cancelled jobs do not show Resume. A Cancelled queue record is restored as Cancelled after app restart.
 
@@ -120,9 +120,7 @@ Active jobs offer two separate stop actions. Pause preserves the HTTP range part
 
 Desktop downloads use the bundled yt-dlp engine for supported media pages, and Android uses the embedded yt-dlp runtime. Known social domains such as Facebook, Instagram, Threads, TikTok, X, Twitch, Reddit, Vimeo and other extractor sites are routed to that engine; ordinary HTML video pages also use yt-dlp's generic extractor. The extractor catalogue changes over time, and a site being listed does not guarantee that every URL will work. Check the upstream [yt-dlp supported-site list](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md).
 
-For content that requires your own signed-in session, import a Netscape-format `cookies.txt` file from the optional Site Login Cookies control. The app stores a job-scoped copy in its private application data folder, passes it only to yt-dlp, retains it for a paused/failed retry, and removes it after a successful download or when the finished job is cleared. Never share your cookies file; it can grant access to your account. Do not enter your account password into DownBest.
-
-Android's embedded free yt-dlp runtime supports a broad extractor catalogue and cookies, but does not include TLS fingerprint impersonation. Some sites may still reject requests due to bot checks, account restrictions, geography, age gates, changed extractors or other server rules. Android packages are restricted to `arm64-v8a` and `x86_64`; 32-bit Android devices are not supported by the bundled runtime. Generic third-party site extraction is not enabled on iOS; that build supports direct HTTP/HTTPS files and its supported open HLS mode.
+Android's embedded free yt-dlp runtime supports a broad extractor catalogue, but does not include TLS fingerprint impersonation. Some sites may still reject requests due to bot checks, account restrictions, geography, age gates, changed extractors or other server rules. Android packages are restricted to `arm64-v8a` and `x86_64`; 32-bit Android devices are not supported by the bundled runtime. Generic third-party site extraction is not enabled on iOS; that build supports direct HTTP/HTTPS files and its supported open HLS mode.
 
 ## Project status
 

@@ -44,3 +44,29 @@ pub struct MediaDownloadResult {
     pub file_name: String,
     pub format: String,
 }
+
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPublishRequest {
+    pub file_path: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaPublishResult {
+    pub content_uri: String,
+    pub file_name: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaOpenRequest {
+    pub content_uri: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaOpenResult {
+    pub opened: bool,
+}

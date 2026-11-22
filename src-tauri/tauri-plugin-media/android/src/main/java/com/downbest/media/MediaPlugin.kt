@@ -1,6 +1,13 @@
 package com.downbest.media
 
 import android.app.Activity
+import android.content.ContentValues
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.webkit.MimeTypeMap
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -34,22 +41,107 @@ class CancelDownloadArgs {
     var jobId: String = ""
 }
 
+@InvokeArg
+class PublishDownloadArgs {
+    var filePath: String = ""
+}
+
+@InvokeArg
+class OpenDownloadArgs {
+    var contentUri: String = ""
+}
+
 @TauriPlugin
 class MediaPlugin(private val activity: Activity) : Plugin(activity) {
     private val activeDownloads = ConcurrentHashMap<String, Future<*>>()
+    private val jobGenerations = ConcurrentHashMap<String, Long>()
+    private val cancelledGenerations = ConcurrentHashMap<String, Long>()
+
+    private fun isCancelled(jobId: String, generation: Long): Boolean =
+        jobGenerations[jobId] != generation || cancelledGenerations[jobId] == generation
 
     @Command
     fun cancelDownload(invoke: Invoke) {
         val args = invoke.parseArgs(CancelDownloadArgs::class.java)
-        val cancelled = activeDownloads.remove(args.jobId)?.cancel(true) ?: false
+        jobGenerations[args.jobId]?.let { generation ->
+            cancelledGenerations[args.jobId] = generation
+        }
+        activeDownloads[args.jobId]?.cancel(true)
         val result = JSObject()
-        result.put("cancelled", cancelled)
+        result.put("cancelled", true)
         invoke.resolve(result)
+    }
+
+    @Command
+    fun publishDownload(invoke: Invoke) {
+        val args = invoke.parseArgs(PublishDownloadArgs::class.java)
+        Thread({
+            var publishedUri: Uri? = null
+            try {
+                require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    "Saving into the shared Downloads folder requires Android 10 or later."
+                }
+                val source = File(args.filePath)
+                require(source.isFile && source.canRead()) {
+                    "The finished file is missing from temporary storage."
+                }
+                val mimeType = MimeTypeMap.getSingleton()
+                    .getMimeTypeFromExtension(source.extension.lowercase())
+                    ?: "application/octet-stream"
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, source.name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                val resolver = activity.contentResolver
+                publishedUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("Android could not create a file in the Downloads folder.")
+                val destination = resolver.openOutputStream(publishedUri!!, "w")
+                    ?: throw IllegalStateException("Android could not open the new Downloads file.")
+                source.inputStream().buffered().use { input ->
+                    destination.buffered().use { output -> input.copyTo(output, 256 * 1024) }
+                }
+                val ready = ContentValues().apply {
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                }
+                resolver.update(publishedUri!!, ready, null, null)
+                val result = JSObject()
+                result.put("contentUri", publishedUri.toString())
+                result.put("fileName", source.name)
+                source.delete()
+                invoke.resolve(result)
+            } catch (error: Exception) {
+                publishedUri?.let { activity.contentResolver.delete(it, null, null) }
+                invoke.reject(error.message ?: "Could not save the finished file to Downloads.")
+            }
+        }, "DownBest-publish-download").start()
+    }
+
+    @Command
+    fun openDownload(invoke: Invoke) {
+        val args = invoke.parseArgs(OpenDownloadArgs::class.java)
+        activity.runOnUiThread {
+            try {
+                val uri = Uri.parse(args.contentUri)
+                require(uri.scheme == "content") { "The saved file location is invalid." }
+                val mimeType = activity.contentResolver.getType(uri) ?: "application/octet-stream"
+                val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                activity.startActivity(Intent.createChooser(view, "Open downloaded file"))
+                val result = JSObject()
+                result.put("opened", true)
+                invoke.resolve(result)
+            } catch (error: Exception) {
+                invoke.reject(error.message ?: "No installed app can open this file type.")
+            }
+        }
     }
 
     @Command
     fun download(invoke: Invoke) {
         val args = invoke.parseArgs(DownloadArgs::class.java)
+        val generation = jobGenerations.merge(args.jobId, 1L) { previous, _ -> previous + 1L } ?: 1L
         Thread({
             try {
                 require(args.url.startsWith("https://") || args.url.startsWith("http://")) {
@@ -66,7 +158,9 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 require(args.jobId.matches(Regex("[A-Za-z0-9_-]{8,64}"))) {
                     "The download job identifier is invalid."
                 }
+                if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 YtDlp.init(activity.applicationContext)
+                if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 val template = File(folder, "%(title).180B [%(id)s] - ${args.jobId}.%(ext)s").absolutePath
                 val request = YtDlpRequest(args.url)
                     .setOutputTemplate(template)
@@ -91,6 +185,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     else -> request.addOption("-f", "best[ext=mp4]/best")
                 }
 
+                if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 val future = YtDlp.executeAsync(request, DownloadProgressCallback { progress, eta, line ->
                     val progressLine = line ?: ""
                     val payload = JSObject()
@@ -101,9 +196,17 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     val matchingFiles = folder.listFiles()
                         ?.filter { it.isFile && it.name.contains(jobMarker) }
                         ?: emptyList()
-                    val downloadedBytes = matchingFiles.sumOf { it.length() }
-                    payload.put("downloadedBytes", downloadedBytes)
                     val parsedTotal = parseTotalBytes(progressLine)
+                    val partialFiles = matchingFiles.filter {
+                        it.name.endsWith(".part") || it.name.contains(".part-Frag")
+                    }
+                    val diskBytes = if (partialFiles.isNotEmpty()) partialFiles.sumOf { it.length() }
+                        else matchingFiles.filterNot { it.name.endsWith(".ytdl") }
+                            .maxOfOrNull { it.length() } ?: 0L
+                    val downloadedBytes = if (parsedTotal != null && progress > 0.0) {
+                        (parsedTotal * progress / 100.0).toLong().coerceAtLeast(0L)
+                    } else diskBytes
+                    payload.put("downloadedBytes", downloadedBytes)
                     val estimatedTotal = parsedTotal ?: if (progress > 0.0 && downloadedBytes > 0L) {
                         (downloadedBytes * 100.0 / progress).toLong()
                     } else null
@@ -116,12 +219,22 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                         // A closed progress channel must not abort the transfer.
                     }
                 })
-                activeDownloads[args.jobId] = future
+                val alreadyRunning = activeDownloads.putIfAbsent(args.jobId, future)
+                if (alreadyRunning != null) {
+                    future.cancel(true)
+                    throw IllegalStateException("The previous transfer is still stopping. Please retry Resume.")
+                }
+                if (isCancelled(args.jobId, generation)) {
+                    activeDownloads.remove(args.jobId, future)
+                    future.cancel(true)
+                    throw InterruptedException("Download cancelled.")
+                }
                 val response = try {
                     future.get(6, TimeUnit.HOURS)
                 } finally {
                     activeDownloads.remove(args.jobId, future)
                 }
+                if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 if (!response.isSuccess) {
                     throw IllegalStateException("yt-dlp failed with exit code ${response.exitCode}. Check whether the source requires sign-in, has changed, or blocks this downloader.")
                 }
@@ -153,6 +266,8 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 invoke.resolve(result)
             } catch (error: Exception) {
                 invoke.reject(error.message ?: "Mobile media download failed.")
+            } finally {
+                cancelledGenerations.remove(args.jobId, generation)
             }
         }, "DownBest-media-download").start()
     }
