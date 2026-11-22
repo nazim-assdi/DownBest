@@ -1,15 +1,17 @@
-# DownBest
+# DownBest Lite
 
-**A Rust + Tauri 2 download manager for Windows, macOS, Linux, Android and iOS.**
+**A low-CPU Rust + Tauri 2 download manager for Windows, macOS, Linux, Android and iOS.**
 
-DownBest combines a native async HTTP/HTTPS engine with desktop media extraction. The goal is to use available bandwidth efficiently without promising a multiplier that the network or source server cannot deliver.
+DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extraction. Lite mode favours low CPU and memory pressure while keeping network throughput efficient; faster modes are available when the device has spare resources.
 
 ## Current implementation
 
-- Adaptive parallel HTTP byte-range downloads (selected profile: 4, 8, 16 or 32 connections).
+- Lite mode is the default: 2 HTTP range connections, at most 2 simultaneous jobs, and an 8 MiB target chunk size to avoid excessive parallel work.
+- Balanced mode uses 4 connections; High throughput mode uses 8. The server must support byte ranges for parallel downloads.
 - A server capability probe, identity encoding for reliable byte offsets, and automatic single-connection fallback when range requests are unsupported or rejected.
-- Up to three simultaneous download jobs; further jobs wait in the in-memory queue.
-- Live byte counts, progress, average throughput, cancellation and queue cleanup.
+- A maximum of 2 simultaneous download jobs; further jobs wait in the in-memory queue.
+- Atomic progress counters avoid a shared mutex on every received network chunk.
+- 256 KiB buffered disk writes reduce small write operations; progress refresh pauses while the app window is hidden.
 - Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
 - Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests.
 - Android bundles yt-dlp with an embedded Python runtime and FFmpegKit for audio-only output; it does not need a separate Python or yt-dlp install.
@@ -89,10 +91,10 @@ Packages are uploaded to the corresponding GitHub Actions run as workflow artifa
 
 ## Speed and reliability notes
 
-The connection selector is a maximum requested parallelism, not a promise that every host accepts that many connections. Actual throughput depends on ISP bandwidth, server/CDN limits, protocol, file size, disk and CPU. Small files use one stream because segmentation overhead would not help. If a host rejects range requests, DownBest retries using one stream.
+Lite mode is recommended for everyday use on lower-powered PCs: it uses 2 requested HTTP connections, 2 simultaneous jobs, 256 KiB buffered disk writes, atomic progress updates, fewer idle pooled connections and a 1.5-second UI refresh while visible. Files below 16 MiB use a single connection; larger files may use up to 2 range connections. Balanced and High throughput modes can use 4 or 8 requested connections. These are limits, not guaranteed multipliers; actual throughput depends on ISP bandwidth, server/CDN limits, protocol, file size, disk and CPU. If a host rejects range requests, DownBest falls back to one stream.
 
 This initial version keeps the download queue in memory; unfinished direct-file downloads do not yet survive an app restart. Automatic pause/resume from a persisted partial file is a later reliability milestone.
 
 ## Project status
 
-The repository contains a cross-platform UI, a Rust HTTP download core, desktop bundled media engines, Android native yt-dlp extraction, and iOS open-HLS support. CI packaging has passed for the initial desktop builds; the latest mobile integration and bundled-tool builds are being tested. Physical Android/iOS device tests and signed iOS export are still required before claiming release readiness.
+The repository contains DownBest Lite 1.1.0, a cross-platform UI, a buffered Rust HTTP download core, desktop bundled media engines, Android native yt-dlp extraction, and iOS open-HLS support. Lite mode defaults to low CPU usage; Balanced and High throughput options are available. CI packaging has passed for the initial desktop builds; the latest mobile integration and bundled-tool builds are being tested. Physical Android/iOS device tests and signed iOS export are still required before claiming release readiness.
