@@ -79,9 +79,11 @@ impl DownloadManager {
         let bytes = std::fs::read(&path).or_else(|_| std::fs::read(&fallback));
         let Ok(bytes) = bytes else { return; };
         let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return; };
+        let mut cancelled_ids = Vec::new();
         if let Ok(mut records) = self.records.lock() {
             for item in items {
-                let status = if item.cancel_requested {
+                let was_cancelled = item.cancel_requested;
+                let status = if was_cancelled {
                     "Cancelled".to_string()
                 } else {
                     match item.status.as_str() {
@@ -89,7 +91,8 @@ impl DownloadManager {
                         _ => "Paused".to_string(),
                     }
                 };
-                records.insert(item.id.clone(), DownloadRecord {
+                let id = item.id.clone();
+                records.insert(id.clone(), DownloadRecord {
                     id: item.id, url: item.url, file_name: item.file_name, kind: item.kind,
                     status, destination: item.destination, file_path: item.file_path,
                     downloaded: Arc::new(AtomicU64::new(item.downloaded_bytes)),
@@ -98,9 +101,14 @@ impl DownloadManager {
                     concurrency: item.concurrency.clamp(1, 8),
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
-                    cancel_requested: Arc::new(AtomicBool::new(item.cancel_requested)),
+                    cancel_requested: Arc::new(AtomicBool::new(was_cancelled)),
                 });
+                if was_cancelled { cancelled_ids.push(id); }
             }
+        }
+        for id in cancelled_ids {
+            cleanup_cancelled_files(self, &id);
+            cleanup_job_cookies(self, &id);
         }
         persist_records(self);
     }
