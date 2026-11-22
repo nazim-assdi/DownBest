@@ -14,7 +14,7 @@ use tokio::{
     sync::Semaphore,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use tokio::{io::{AsyncBufReadExt, AsyncReadExt, BufReader}, process::Command};
+use tokio::{io::{AsyncBufReadExt, BufReader}, process::Command};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -922,7 +922,7 @@ async fn reveal_download(manager: State<'_, DownloadManager>, id: String) -> Res
             .map_err(|error| format!("Could not reveal the file in Finder: {error}"))?;
         Ok(())
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
         let folder = file.parent().ok_or_else(|| "The file has no parent folder.".to_string())?;
         Command::new("xdg-open").arg(folder).spawn()
