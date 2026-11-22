@@ -73,7 +73,7 @@ root.innerHTML = [
   '<div class="side-label">WORKSPACE</div>',
   '<button class="nav active" type="button"><span class="nav-icon">' + icons.download + '</span><span>Downloads</span><b id="active-count">0</b></button>',
   '<div class="side-tip"><div class="tip-icon">' + icons.bolt + '</div><b>Lite engine</b><p>Low resource usage with parallel queue processing and live transfer updates.</p></div>',
-  '<div class="sidebar-info"><span>LIVE DOWNLOADS</span><b id="sidebar-active">0 active</b><small>Maximum 2 parallel jobs</small></div>',
+  '<div class="sidebar-info"><span>LIVE DOWNLOADS</span><b id="sidebar-active">0 running</b><small id="sidebar-queued">0 waiting · max 2 parallel jobs</small></div>',
   '<div class="sidebar-foot"><span>PRIVATE BY DESIGN</span><small>DOWNBEST LITE 1.2.0</small></div>',
   '</aside>',
   '<main class="main">',
@@ -106,11 +106,14 @@ function renderTools(tools: Tool[]) {
 function renderDownloads() {
   const list = document.querySelector<HTMLDivElement>("#download-list")!;
   const active = downloads.filter(d => !finalStatus(d.status));
+  const running = active.filter(d => d.status !== "Queued");
+  const queued = active.length - running.length;
   const completed = downloads.filter(d => d.status === "Completed");
   const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled");
   document.querySelector("#active-count")!.textContent = String(active.length);
-  document.querySelector("#sidebar-active")!.textContent = active.length + " active";
-  document.querySelector("#stat-active")!.textContent = String(active.length);
+  document.querySelector("#sidebar-active")!.textContent = running.length + " running";
+  document.querySelector("#sidebar-queued")!.textContent = queued + " waiting · max 2 parallel jobs";
+  document.querySelector("#stat-active")!.textContent = String(running.length);
   document.querySelector("#stat-completed")!.textContent = String(completed.length);
   document.querySelector("#queue-count")!.textContent = String(downloads.length);
   document.querySelector("#count-all")!.textContent = String(downloads.length);
@@ -289,20 +292,21 @@ document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("sub
     ));
     const added = results.filter(result => result.status === "fulfilled").length;
     const rejected = results.length - added;
+    const failedUrls = results.flatMap((result, index) => result.status === "rejected" ? [urls[index]] : []);
     if (added > 0) {
-      document.querySelector<HTMLTextAreaElement>("#urls")!.value = "";
+      document.querySelector<HTMLTextAreaElement>("#urls")!.value = failedUrls.join("\n");
       updateUrlCount();
-      toast(added + (added === 1 ? " download added to queue." : " downloads added to queue.") +
-        (rejected ? " " + rejected + " link(s) could not be added." : ""));
+      const firstError = results.find(result => result.status === "rejected");
+      const detail = rejected
+        ? " " + rejected + " failed link(s) were kept above so you can retry them." +
+          (firstError && firstError.status === "rejected" ? " " + String(firstError.reason) : "")
+        : "";
+      toast(added + (added === 1 ? " download added to queue." : " downloads added to queue.") + detail, rejected > 0);
       await refreshDownloads();
       scheduleRefresh(100);
     } else {
       const firstError = results.find(result => result.status === "rejected");
       toast(firstError && firstError.status === "rejected" ? String(firstError.reason) : "Could not add downloads.", true);
-    }
-    if (rejected && added) {
-      const firstError = results.find(result => result.status === "rejected");
-      if (firstError && firstError.status === "rejected") toast(rejected + " link(s) failed: " + String(firstError.reason), true);
     }
   } catch (error) {
     toast(String(error), true);
