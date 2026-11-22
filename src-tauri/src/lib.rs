@@ -505,7 +505,7 @@ async fn run_media_download(
         .arg("-P").arg(destination).arg("-o").arg("%(title).180B [%(id)s].%(ext)s");
     match kind {
         "audio" => { command.arg("-f").arg("bestaudio/best"); }
-        "video-only" => { command.arg("-f").arg("bestvideo/best"); }
+        "video-only" => { command.arg("-f").arg("bestvideo"); }
         "video" if has_ffmpeg => {
             command.arg("-f").arg("bestvideo+bestaudio/best").arg("--merge-output-format").arg("mp4");
         }
