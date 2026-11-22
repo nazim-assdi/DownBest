@@ -158,7 +158,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun parseTotalBytes(line: String): Long? {
-        val match = Regex("""(?:of\\s+)(?:~)?([0-9]+(?:\\.[0-9]+)?)\\s*([KMGT]?i?B)""", RegexOption.IGNORE_CASE)
+        val match = Regex("""(?:of\s+)(?:~)?([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B)""", RegexOption.IGNORE_CASE)
             .find(line) ?: return null
         val amount = match.groupValues[1].toDoubleOrNull() ?: return null
         val unit = match.groupValues[2].uppercase()
