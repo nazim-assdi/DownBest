@@ -348,7 +348,7 @@ document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("sub
   button.innerHTML = '<span class="spinner"></span><b>Adding ' + urls.length + ' links…</b>';
   try {
     const results = await Promise.allSettled(urls.map(url =>
-      invoke("start_download", { url, kind, destination: destination || null, concurrency })
+      invoke("start_download", { url, kind, destination: destination || null, concurrency, cookies: null })
     ));
     const added = results.filter(result => result.status === "fulfilled").length;
     const rejected = results.length - added;
