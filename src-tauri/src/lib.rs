@@ -144,7 +144,8 @@ fn write_job_cookies(app: &AppHandle, id: &str, contents: Option<String>) -> Res
         return Err("The cookies.txt file is too large (maximum 4 MiB).".into());
     }
     let has_cookie_rows = contents.lines().any(|line| {
-        !line.trim().is_empty() && !line.starts_with('#') && line.split('\t').count() >= 7
+        let row = line.strip_prefix("#HttpOnly_").unwrap_or(line);
+        !row.trim().is_empty() && !row.starts_with('#') && row.split('\t').count() >= 7
     });
     if !has_cookie_rows {
         return Err("Invalid cookies.txt file. Export cookies in Netscape format and try again.".into());
