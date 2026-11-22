@@ -1,6 +1,6 @@
 [package]
 name = "downbest"
-version = "1.1.0"
+version = "1.2.0"
 description = "DownBest high-speed cross-platform download manager"
 authors = ["DownBest Contributors"]
 edition = "2021"
