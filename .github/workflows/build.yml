@@ -132,6 +132,9 @@ jobs:
         run: npm run tauri icon app-icon.svg
       - name: Build desktop app
         run: npm run tauri build
+      - name: Run Rust unit tests
+        if: runner.os == 'Linux'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Upload desktop packages
         uses: actions/upload-artifact@v4
         with:
