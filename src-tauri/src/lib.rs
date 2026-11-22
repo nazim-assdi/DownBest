@@ -1361,12 +1361,22 @@ mod lite_mode_tests {
         let target = root.join("resume.bin");
         let partial = PathBuf::from(format!("{}.downbest-resume-job.tmp", target.display()));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+        listener.set_nonblocking(true).expect("set bounded HTTP accept");
         let address = listener.local_addr().expect("read server address");
 
         let server = std::thread::spawn(move || {
             const BODY: &[u8] = b"0123456789abcdef";
             for step in 0..4 {
-                let (mut socket, _) = listener.accept().expect("accept HTTP request");
+                let deadline = Instant::now() + std::time::Duration::from_secs(10);
+                let (mut socket, _) = loop {
+                    match listener.accept() {
+                        Ok(connection) => break connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("timed out waiting for HTTP request {step}: {error}"),
+                    }
+                };
                 socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
                 let mut request = Vec::new();
                 let mut buffer = [0u8; 1024];
