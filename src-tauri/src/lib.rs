@@ -383,20 +383,23 @@ fn spawn_download_task(
                 set_status(&manager, &id, "Completed", None);
                 cleanup_job_cookies(&manager, &id);
             },
-            Err(error) if error == "Cancelled" => {
-                let was_cancelled = manager.records.lock().ok()
-                    .and_then(|records| records.get(&id).map(|record|
-                        record.cancel_requested.load(Ordering::Relaxed)))
-                    .unwrap_or(false);
-                if was_cancelled {
+            Err(error) => {
+                let stop_requested = manager.records.lock().ok()
+                    .and_then(|records| records.get(&id).map(|record| (
+                        record.cancel.is_cancelled(),
+                        record.cancel_requested.load(Ordering::Relaxed),
+                    )))
+                    .unwrap_or((error == "Cancelled", false));
+                if stop_requested.1 {
                     cleanup_cancelled_files(&manager, &id);
                     set_status(&manager, &id, "Cancelled", None);
                     cleanup_job_cookies(&manager, &id);
-                } else {
+                } else if stop_requested.0 || error == "Cancelled" {
                     set_status(&manager, &id, "Paused", None);
+                } else {
+                    set_status(&manager, &id, "Failed", Some(error));
                 }
             },
-            Err(error) => set_status(&manager, &id, "Failed", Some(error)),
         }
     });
 }
