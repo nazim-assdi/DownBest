@@ -9,6 +9,7 @@ pub struct MediaDownloadRequest {
     pub job_id: String,
     pub kind: String,
     pub concurrency: usize,
+    pub cookies_file: Option<String>,
     pub on_progress: Channel<MediaProgress>,
 }
 
@@ -30,6 +31,7 @@ pub struct MediaProgress {
     pub progress: f64,
     #[serde(default)]
     pub downloaded_bytes: u64,
+    #[serde(default)]
     pub total_bytes: Option<u64>,
     pub eta_seconds: Option<u64>,
     pub line: String,
