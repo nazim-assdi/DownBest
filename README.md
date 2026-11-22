@@ -12,6 +12,7 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Multi-link batch submission: paste up to 50 HTTP/HTTPS URLs (one per line); all valid jobs enter the queue and up to 2 execute simultaneously while the rest wait in queue.
 - Atomic progress counters avoid a shared mutex on every received network chunk.
 - 256 KiB buffered disk writes reduce small write operations; the UI refreshes active downloads every 650 ms and slows down while idle or hidden.
+- Eye Comfort is the default UI theme, with Midnight and Soft Light options, locally persisted appearance preferences, reduced motion and larger text controls; the interface uses system fonts and works without a remote font request.
 - Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
 - Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests. Both process output streams are drained concurrently: stderr drives live progress and stdout reports the final post-processed file path. Windows extractor processes launch without a visible console window.
 - Android bundles yt-dlp with an embedded Python runtime and FFmpegKit for audio-only output; it does not need a separate Python or yt-dlp install.
