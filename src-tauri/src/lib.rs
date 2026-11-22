@@ -85,6 +85,39 @@ fn set_file_name(manager: &DownloadManager, id: &str, name: &str) {
         if let Some(record) = records.get_mut(id) { record.file_name = name.to_string(); }
     }
 }
+fn set_file_path(manager: &DownloadManager, id: &str, path: &Path) {
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            record.file_path = Some(path.to_string_lossy().into_owned());
+            if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+                record.file_name = name.to_string();
+            }
+        }
+    }
+}
+
+fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
+    let fields: Vec<&str> = data.split('|').collect();
+    let downloaded = fields.first().and_then(|value| value.parse::<u64>().ok());
+    let total = fields.get(1).and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| fields.get(2).and_then(|value| value.parse::<u64>().ok()));
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            if let Some(value) = downloaded {
+                record.downloaded.store(value, Ordering::Relaxed);
+            }
+            if let Some(value) = total {
+                record.total = Some(value);
+            }
+            if downloaded.unwrap_or(0) > 0 && record.status != "Downloading" {
+                record.started = Instant::now();
+                record.status = "Downloading".into();
+                record.error = None;
+            }
+        }
+    }
+}
+
 fn progress_counter(manager: &DownloadManager, id: &str) -> Result<Arc<AtomicU64>, String> {
     let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
     records.get(id).map(|record| record.downloaded.clone())
@@ -186,6 +219,7 @@ async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
         if let Some(path) = find_tool(&app, name) {
             let mut command = Command::new(&path);
             configure_tool_environment(&mut command, &path);
+            configure_no_console(&mut command);
             let output = command.arg("--version").output().await.ok();
             let version = output.map(|o| String::from_utf8_lossy(&o.stdout).lines().next()
                 .unwrap_or("Available").trim().to_string()).filter(|v| !v.is_empty());
@@ -255,7 +289,9 @@ async fn execute_download(
     let target = unique_path(&destination, &name);
     set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     set_status(&manager, &id, "Downloading", None);
-    download_http(&client, &url, &target, &destination, &id, concurrency, &manager, &cancel).await
+    download_http(&client, &url, &target, &destination, &id, concurrency, &manager, &cancel).await?;
+    set_file_path(&manager, &id, &target);
+    Ok(())
 }
 
 async fn looks_like_html_page(client: &Client, url: &str) -> bool {
@@ -509,6 +545,7 @@ async fn run_media_download(
         .await.map_err(|e| format!("Mobile media worker failed: {e}"))?
         .map_err(|e| format!("Mobile media engine: {e}"))?;
     set_file_name(manager, id, &result.file_name);
+    set_file_path(manager, id, Path::new(&result.file_path));
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     if !Path::new(&result.file_path).is_file() {
         return Err("The Android extractor reported success but the output file is missing.".into());
@@ -713,6 +750,7 @@ async fn download_open_hls(
     output.get_ref().sync_all().await.map_err(|e| format!("Could not sync HLS output: {e}"))?;
     drop(output);
     fs::rename(&temp, &target).await.map_err(|e| format!("Could not finalize HLS output: {e}"))?;
+    set_file_path(manager, id, &target);
     Ok(())
 }
 
