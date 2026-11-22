@@ -186,12 +186,103 @@ jobs:
         run: npm run tauri icon app-icon.svg
       - name: Build APKs
         run: npm run tauri android build -- --apk --split-per-abi
+      - name: Sign and validate Android APKs
+        shell: bash
+        env:
+          DOWNBEST_ANDROID_KEYSTORE_BASE64: ${{ secrets.DOWNBEST_ANDROID_KEYSTORE_BASE64 }}
+          DOWNBEST_ANDROID_STORE_PASSWORD: ${{ secrets.DOWNBEST_ANDROID_STORE_PASSWORD }}
+          DOWNBEST_ANDROID_KEY_ALIAS: ${{ secrets.DOWNBEST_ANDROID_KEY_ALIAS }}
+          DOWNBEST_ANDROID_KEY_PASSWORD: ${{ secrets.DOWNBEST_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          apk_dir="src-tauri/gen/android/app/build/outputs/apk"
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          keystore="$RUNNER_TEMP/downbest-signing.keystore"
+
+          mapfile -t unsigned_apks < <(find "$apk_dir" -type f -name '*-unsigned.apk' -print | sort)
+          if [ "${#unsigned_apks[@]}" -eq 0 ]; then
+            echo "No unsigned APKs were produced." >&2
+            exit 1
+          fi
+
+          if [[ -n "${DOWNBEST_ANDROID_KEYSTORE_BASE64:-}" || -n "${DOWNBEST_ANDROID_STORE_PASSWORD:-}" || -n "${DOWNBEST_ANDROID_KEY_ALIAS:-}" || -n "${DOWNBEST_ANDROID_KEY_PASSWORD:-}" ]]; then
+            if [[ -z "${DOWNBEST_ANDROID_KEYSTORE_BASE64:-}" || -z "${DOWNBEST_ANDROID_STORE_PASSWORD:-}" || -z "${DOWNBEST_ANDROID_KEY_ALIAS:-}" || -z "${DOWNBEST_ANDROID_KEY_PASSWORD:-}" ]]; then
+              echo "All four DOWNBEST_ANDROID_* signing secrets must be configured together." >&2
+              exit 1
+            fi
+            printf '%s' "$DOWNBEST_ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            store_password="$DOWNBEST_ANDROID_STORE_PASSWORD"
+            key_alias="$DOWNBEST_ANDROID_KEY_ALIAS"
+            key_password="$DOWNBEST_ANDROID_KEY_PASSWORD"
+            echo "Using the configured persistent Android signing key."
+          else
+            store_password="android"
+            key_alias="androiddebugkey"
+            key_password="android"
+            keytool -genkeypair -v \
+              -keystore "$keystore" \
+              -storepass "$store_password" \
+              -alias "$key_alias" \
+              -keypass "$key_password" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=DownBest CI Debug,O=DownBest,C=BD"
+            echo "::warning::No persistent Android signing key is configured. This APK is signed for sideload testing; a new CI signing key is generated for each run, so uninstall this build before installing a later CI build. Configure the four DOWNBEST_ANDROID_* repository secrets for stable app updates."
+          fi
+          chmod 600 "$keystore"
+          export DOWNBEST_APK_STORE_PASSWORD="$store_password"
+          export DOWNBEST_APK_KEY_PASSWORD="$key_password"
+
+          for unsigned_apk in "${unsigned_apks[@]}"; do
+            signed_apk="${unsigned_apk%-unsigned.apk}.apk"
+            aligned_apk="$RUNNER_TEMP/$(basename "${unsigned_apk%-unsigned.apk}").aligned.apk"
+
+            "$build_tools/zipalign" -f -P 16 4 "$unsigned_apk" "$aligned_apk"
+            "$build_tools/apksigner" sign \
+              --ks "$keystore" \
+              --ks-key-alias "$key_alias" \
+              --ks-pass env:DOWNBEST_APK_STORE_PASSWORD \
+              --key-pass env:DOWNBEST_APK_KEY_PASSWORD \
+              --out "$signed_apk" "$aligned_apk"
+
+            "$build_tools/apksigner" verify --verbose --print-certs "$signed_apk"
+            "$build_tools/zipalign" -c -P 16 4 "$signed_apk"
+            unzip -t "$signed_apk" >/dev/null
+
+            package_line="$("$build_tools/aapt" dump badging "$signed_apk" | sed -n '1p')"
+            if [[ "$package_line" != package:* ]]; then
+              echo "APK manifest/package metadata is missing: $signed_apk" >&2
+              exit 1
+            fi
+
+            abi_dir="${unsigned_apk#"$apk_dir"/}"
+            abi_dir="${abi_dir%%/*}"
+            case "$abi_dir" in
+              arm64) native_abi="arm64-v8a" ;;
+              arm) native_abi="armeabi-v7a" ;;
+              x86) native_abi="x86" ;;
+              x86_64) native_abi="x86_64" ;;
+              *) echo "Unexpected APK ABI folder: $abi_dir" >&2; exit 1 ;;
+            esac
+            unzip -Z1 "$signed_apk" | grep -qx "lib/$native_abi/libdownbest_lib.so" || {
+              echo "Expected $native_abi native library is missing from $signed_apk" >&2
+              exit 1
+            }
+
+            echo "Validated signed APK: $signed_apk ($native_abi)"
+            echo "$package_line"
+            rm -f "$unsigned_apk" "$aligned_apk"
+          done
+
+          if find "$apk_dir" -type f -name '*-unsigned.apk' | grep -q .; then
+            echo "Unsigned APKs must not be uploaded." >&2
+            exit 1
+          fi
       - name: Upload Android APKs
         uses: actions/upload-artifact@v4
         with:
           name: android-apks
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 14
 
   ios-rust-check:
