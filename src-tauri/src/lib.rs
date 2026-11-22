@@ -204,7 +204,8 @@ fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
     let marker = format!(" - {site_job_suffix}.");
     if let Ok(entries) = std::fs::read_dir(&destination) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
+            let file_name = entry.file_name();
+            if let Some(name) = file_name.to_str() {
                 if name.contains(&marker) {
                     let path = entry.path();
                     if path.is_file() { let _ = std::fs::remove_file(path); }
@@ -1543,6 +1544,31 @@ mod lite_mode_tests {
             cookies_file: None,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn cancelled_job_remains_cancelled_after_queue_restore() {
+        let root = std::env::temp_dir().join(format!("downbest-cancel-restore-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create cancellation restore folder");
+        let queue_path = root.join("queue.json");
+
+        let original = DownloadManager::default();
+        original.restore_queue(queue_path.clone());
+        let mut record = queued_record("cancelled-restore");
+        record.status = "Cancelling".into();
+        record.cancel_requested.store(true, Ordering::Relaxed);
+        original.records.lock().expect("lock original queue")
+            .insert(record.id.clone(), record);
+        persist_records(&original);
+
+        let restored = DownloadManager::default();
+        restored.restore_queue(queue_path);
+        let records = restored.records.lock().expect("lock restored queue");
+        let item = records.get("cancelled-restore").expect("restored cancelled job");
+        assert_eq!(item.status, "Cancelled");
+        assert!(item.cancel_requested.load(Ordering::Relaxed));
+        drop(records);
+        std::fs::remove_dir_all(root).expect("remove cancellation restore folder");
     }
 
     #[test]
