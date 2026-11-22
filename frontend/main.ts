@@ -183,7 +183,7 @@ function renderDownloads() {
         : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel and delete incomplete files">Cancel</button></div>'
       : done && d.file_path && desktopFileActions
         ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
-        : paused || failedItem || cancelled
+        : paused || failedItem
           ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
           : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
     return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><div class="download-meta"><span>' + (done ? "100% complete" : pct.toFixed(1) + "%") + ' <em>·</em> ' + safe(d.kind.toUpperCase()) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
