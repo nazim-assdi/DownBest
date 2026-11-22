@@ -320,6 +320,16 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     }
     dir.join(format!("{}-{}", Uuid::new_v4(), name))
 }
+fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
+    const MIN_PARALLEL_FILE: u64 = 16 * 1024 * 1024;
+    const TARGET_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
+    if total_bytes < MIN_PARALLEL_FILE {
+        return 1;
+    }
+    let requested = requested.clamp(1, 8);
+    requested.min(((total_bytes / TARGET_SEGMENT_BYTES).max(1)) as usize).max(1)
+}
+
 fn parse_content_range(value: Option<&header::HeaderValue>) -> Option<u64> {
     let raw = value?.to_str().ok()?;
     let (_, total) = raw.split_once('/')?;
@@ -336,11 +346,11 @@ async fn download_http(
         let total = parse_content_range(probe.headers().get(header::CONTENT_RANGE))
             .ok_or_else(|| "The server returned an invalid Content-Range header.".to_string())?;
         set_total(manager, id, Some(total));
-        let count = concurrency.min(((total / (8 * 1024 * 1024)).max(1)) as usize).min(8);
-        if total >= 16 * 1024 * 1024 && count > 1 {
+        let count = effective_segment_count(total, concurrency);
+        if count > 1 {
             drop(probe);
             let progress = progress_counter(manager, id)?;
-            match download_segmented(client, url, target, destination, id, total, count, manager, progress, cancel).await {
+            match download_segmented(client, url, target, destination, id, total, count, progress, cancel).await {
                 Ok(()) => Ok(()),
                 Err(error) if error == "Cancelled" => Err(error),
                 Err(_range_error) => {
@@ -399,7 +409,7 @@ async fn stream_to_target(
 
 async fn download_segmented(
     client: &Client, url: &str, target: &Path, destination: &Path, id: &str,
-    total: u64, count: usize, manager: &DownloadManager, progress: Arc<AtomicU64>,
+    total: u64, count: usize, progress: Arc<AtomicU64>,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
     let parts_dir = destination.join(format!(".downbest-{id}"));
@@ -413,12 +423,11 @@ async fn download_segmented(
         let client = client.clone();
         let url = url.to_string();
         let part_path = parts_dir.join(format!("part-{index:03}"));
-        let manager = manager.clone();
         let id = id.to_string();
         let cancel = cancel.clone();
         let progress = progress.clone();
         jobs.push(async move {
-            download_piece(client, url, start, end, part_path.clone(), &id, manager, progress, cancel).await?;
+            download_piece(client, url, start, end, part_path.clone(), &id, progress, cancel).await?;
             Ok::<PathBuf, String>(part_path)
         });
     }
@@ -445,7 +454,7 @@ async fn download_segmented(
 
 async fn download_piece(
     client: Client, url: String, start: u64, end: u64, path: PathBuf, id: &str,
-    manager: DownloadManager, progress: Arc<AtomicU64>, cancel: CancellationToken,
+    progress: Arc<AtomicU64>, cancel: CancellationToken,
 ) -> Result<(), String> {
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let response = client.get(&url).header(header::RANGE, format!("bytes={start}-{end}"))
@@ -771,6 +780,30 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
         candidates.push(path.join(&executable));
     }
     candidates.into_iter().find(|path| path.is_file())
+}
+
+
+#[cfg(test)]
+mod lite_mode_tests {
+    use super::effective_segment_count;
+
+    #[test]
+    fn lite_mode_uses_one_stream_for_small_files() {
+        assert_eq!(effective_segment_count(15 * 1024 * 1024, 2), 1);
+    }
+
+    #[test]
+    fn lite_mode_caps_large_downloads_at_two_segments() {
+        assert_eq!(effective_segment_count(16 * 1024 * 1024, 2), 2);
+        assert_eq!(effective_segment_count(128 * 1024 * 1024, 2), 2);
+    }
+
+    #[test]
+    fn balanced_and_high_modes_respect_requested_limits() {
+        assert_eq!(effective_segment_count(32 * 1024 * 1024, 4), 4);
+        assert_eq!(effective_segment_count(64 * 1024 * 1024, 8), 8);
+        assert_eq!(effective_segment_count(64 * 1024 * 1024, 32), 8);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
