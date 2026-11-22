@@ -9,17 +9,18 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Lite mode is the default: 2 HTTP range connections, at most 2 simultaneous jobs, and an 8 MiB target chunk size to avoid excessive parallel work.
 - Balanced mode uses 4 connections; High throughput mode uses 8. The server must support byte ranges for parallel downloads.
 - A server capability probe, identity encoding for reliable byte offsets, and automatic single-connection fallback when range requests are unsupported or rejected.
-- A maximum of 2 simultaneous download jobs; further jobs wait in the in-memory queue.
+- Multi-link batch submission: paste up to 50 HTTP/HTTPS URLs (one per line); all valid jobs enter the queue and up to 2 execute simultaneously while the rest wait in queue.
 - Atomic progress counters avoid a shared mutex on every received network chunk.
-- 256 KiB buffered disk writes reduce small write operations; progress refresh pauses while the app window is hidden.
+- 256 KiB buffered disk writes reduce small write operations; the UI refreshes active downloads every 650 ms and slows down while idle or hidden.
 - Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
-- Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests.
+- Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests. Both process output streams are drained concurrently: stderr drives live progress and stdout reports the final post-processed file path. Windows extractor processes launch without a visible console window.
 - Android bundles yt-dlp with an embedded Python runtime and FFmpegKit for audio-only output; it does not need a separate Python or yt-dlp install.
 - iOS includes a native open-HLS VOD downloader for unencrypted playlists, plus the direct HTTP/HTTPS downloader.
 - Audio-only, video-only and video+audio format selection for media-extractor links.
 - yt-dlp concurrent fragment downloads; bundled aria2c is used for HTTP/FTP transfers while its native downloader remains selected for DASH/HLS.
 - Bundled FFmpeg is used by yt-dlp to merge separate audio and video streams.
-- App-specific private storage is used as the default destination on Android/iOS.
+- Desktop users can choose the save folder with the native folder picker and reveal completed files in the system file manager. The default folder is Downloads.
+- App-specific private storage is used as the default destination on Android/iOS; the desktop folder picker is not shown on mobile.
 - One Tauri 2 codebase and one Git branch: `main`.
 
 ## Supported targets and current limits
@@ -93,8 +94,8 @@ Packages are uploaded to the corresponding GitHub Actions run as workflow artifa
 
 Lite mode is recommended for everyday use on lower-powered PCs: it uses 2 requested HTTP connections, 2 simultaneous jobs, 256 KiB buffered disk writes, atomic progress updates, fewer idle pooled connections and a 1.5-second UI refresh while visible. Files below 16 MiB use a single connection; larger files may use up to 2 range connections. Balanced and High throughput modes can use 4 or 8 requested connections. These are limits, not guaranteed multipliers; actual throughput depends on ISP bandwidth, server/CDN limits, protocol, file size, disk and CPU. If a host rejects range requests, DownBest falls back to one stream.
 
-This initial version keeps the download queue in memory; unfinished direct-file downloads do not yet survive an app restart. Automatic pause/resume from a persisted partial file is a later reliability milestone.
+The download queue and active job state are currently kept in memory; unfinished direct-file downloads do not yet survive an app restart. Automatic pause/resume from a persisted partial file is a later reliability milestone.
 
 ## Project status
 
-The repository contains DownBest Lite 1.1.0, a cross-platform UI, a buffered Rust HTTP download core, desktop bundled media engines, Android native yt-dlp extraction, and iOS open-HLS support. Lite mode defaults to low CPU usage; Balanced and High throughput options are available. CI packaging has passed for the initial desktop builds; the latest mobile integration and bundled-tool builds are being tested. Physical Android/iOS device tests and signed iOS export are still required before claiming release readiness.
+The repository contains DownBest Lite 1.2.0, a cross-platform UI, a buffered Rust HTTP download core, desktop bundled media engines, Android native yt-dlp extraction, and iOS open-HLS support. Lite mode defaults to low CPU usage; Balanced and High throughput options are available. CI packaging has passed for the initial desktop builds; the latest mobile integration and bundled-tool builds are being tested. Physical Android/iOS device tests and signed iOS export are still required before claiming release readiness.
