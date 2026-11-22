@@ -10,10 +10,13 @@ DownBest combines a native async HTTP/HTTPS engine with desktop media extraction
 - A server capability probe, identity encoding for reliable byte offsets, and automatic single-connection fallback when range requests are unsupported or rejected.
 - Up to three simultaneous download jobs; further jobs wait in the in-memory queue.
 - Live byte counts, progress, average throughput, cancellation and queue cleanup.
+- Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
 - Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests.
+- Android bundles yt-dlp with an embedded Python runtime and FFmpegKit for audio-only output; it does not need a separate Python or yt-dlp install.
+- iOS includes a native open-HLS VOD downloader for unencrypted playlists, plus the direct HTTP/HTTPS downloader.
 - Audio-only, video-only and video+audio format selection for media-extractor links.
-- yt-dlp concurrent fragment downloads; optional aria2c for HTTP/FTP transfers while its native downloader remains selected for DASH/HLS.
-- FFmpeg is used by yt-dlp to merge separate audio and video streams when installed.
+- yt-dlp concurrent fragment downloads; bundled aria2c is used for HTTP/FTP transfers while its native downloader remains selected for DASH/HLS.
+- Bundled FFmpeg is used by yt-dlp to merge separate audio and video streams.
 - App-specific private storage is used as the default destination on Android/iOS.
 - One Tauri 2 codebase and one Git branch: `main`.
 
@@ -27,7 +30,7 @@ DownBest combines a native async HTTP/HTTPS engine with desktop media extraction
 | Android | APK | Direct HTTP(S) file links |
 | iOS | IPA | Direct HTTP(S) file links; Apple signing is required |
 
-**Mobile limitation:** yt-dlp, aria2c and FFmpeg are desktop executables in this first version. Media-site extraction (for example, YouTube pages) is desktop-only; direct downloadable HTTP/HTTPS file URLs work on mobile. The default mobile save path is inside the app's private storage. Exporting files into the public Downloads folder needs a native file-export / Storage Access Framework workflow and is not yet implemented.
+**Mobile limits:** Android bundles yt-dlp and FFmpegKit, so supported media-site extraction works without separate installations. The Android yt-dlp runtime is compiled for ARM64 and x86_64; it does not include 32-bit ABIs. iOS uses its native open-HLS saver only for finite, unencrypted VOD playlists; generic third-party site extraction is not enabled in the App Store build. Both platforms also support direct downloadable HTTP/HTTPS file URLs. The default mobile save path is inside the app's private storage. Exporting files into the public Downloads folder needs a native file-export / Storage Access Framework workflow and is not yet implemented.
 
 yt-dlp supports many extractors, but no application can guarantee that every website, DRM-protected stream, login-gated media item or regional restriction will work. DownBest does not bypass DRM, authentication, access controls or source-server rate limits.
 
@@ -62,13 +65,7 @@ iOS (macOS + Xcode + Apple Developer signing configured):
 
 ## Optional desktop media tools
 
-Install platform-matching releases and place them on PATH, or in a `tools/` folder beside the installed app executable:
-
-- `yt-dlp` — media-site extraction.
-- `aria2c` — optional accelerated HTTP/FTP transfers invoked by yt-dlp.
-- `ffmpeg` — merge separate audio/video streams.
-
-The native Rust direct-file downloader does not require these tools. Do not download binaries from untrusted mirrors; review upstream licences before redistributing third-party tools.
+Desktop releases now bundle platform-matching `yt-dlp`, `aria2c`, `ffmpeg` and `ffprobe` binaries in the Tauri resources directory. The app still detects a system-installed copy as a fallback when running a development build. Build automation fetches yt-dlp from its official GitHub releases, aria2 from its official release archive, and LGPL FFmpeg builds (Linux/Windows) or compiles a minimal LGPL-only FFmpeg from source on macOS. License notices and upstream source links are kept in `THIRD_PARTY_NOTICES.md`. The Android APK embeds yt-dlp-android and FFmpegKit through Maven Central; those libraries are pinned to versions in the Android plugin Gradle file.
 
 ## GitHub Actions builds
 
@@ -98,4 +95,4 @@ This initial version keeps the download queue in memory; unfinished direct-file 
 
 ## Project status
 
-The repository started empty and now contains the first cross-platform scaffold, UI, Rust download core and CI workflow. Build jobs and real-device testing still need to pass before the installers can be called release-ready.
+The repository contains a cross-platform UI, a Rust HTTP download core, desktop bundled media engines, Android native yt-dlp extraction, and iOS open-HLS support. CI packaging has passed for the initial desktop builds; the latest mobile integration and bundled-tool builds are being tested. Physical Android/iOS device tests and signed iOS export are still required before claiming release readiness.
