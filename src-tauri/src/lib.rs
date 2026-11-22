@@ -1422,6 +1422,7 @@ mod lite_mode_tests {
             concurrency: 2,
             etag: None,
             last_modified: None,
+            cookies_file: None,
         }
     }
 
