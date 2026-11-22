@@ -47,6 +47,8 @@ struct PersistedDownload {
     destination: String, file_path: Option<String>, downloaded_bytes: u64,
     total_bytes: Option<u64>, error: Option<String>, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
+    #[serde(default)]
+    cookies_file: Option<String>,
 }
 
 #[cfg(target_os = "ios")]
@@ -63,6 +65,7 @@ struct DownloadRecord {
     started: Instant, error: Option<String>, cancel: CancellationToken,
     progress_override: Option<f64>, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
+    cookies_file: Option<String>,
 }
 
 impl DownloadManager {
@@ -87,6 +90,7 @@ impl DownloadManager {
                     cancel: CancellationToken::new(), progress_override: None,
                     concurrency: item.concurrency.clamp(1, 8),
                     etag: item.etag, last_modified: item.last_modified,
+                    cookies_file: item.cookies_file,
                 });
             }
         }
@@ -106,6 +110,7 @@ fn persist_records(manager: &DownloadManager) {
             downloaded_bytes: record.downloaded.load(Ordering::Relaxed),
             total_bytes: record.total, error: record.error.clone(), concurrency: record.concurrency,
             etag: record.etag.clone(), last_modified: record.last_modified.clone(),
+            cookies_file: record.cookies_file.clone(),
         }).collect::<Vec<_>>()
     };
     let Ok(bytes) = serde_json::to_vec(&items) else { return; };
@@ -130,6 +135,43 @@ fn persist_records(manager: &DownloadManager) {
             }
         }
     }
+}
+
+fn write_job_cookies(app: &AppHandle, id: &str, contents: Option<String>) -> Result<Option<String>, String> {
+    let Some(contents) = contents else { return Ok(None); };
+    if contents.trim().is_empty() { return Ok(None); }
+    if contents.len() > 4 * 1024 * 1024 {
+        return Err("The cookies.txt file is too large (maximum 4 MiB).".into());
+    }
+    let has_cookie_rows = contents.lines().any(|line| {
+        !line.trim().is_empty() && !line.starts_with('#') && line.split('\\t').count() >= 7
+    });
+    if !has_cookie_rows {
+        return Err("Invalid cookies.txt file. Export cookies in Netscape format and try again.".into());
+    }
+    let directory = app.path().app_data_dir()
+        .map_err(|error| format!("Could not locate the private app data folder: {error}"))?
+        .join("cookies");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create private cookies folder: {error}"))?;
+    let path = directory.join(format!("{id}.txt"));
+    std::fs::write(&path, contents)
+        .map_err(|error| format!("Could not save the imported cookies file: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not protect the imported cookies file: {error}"))?;
+    }
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+fn cleanup_job_cookies(manager: &DownloadManager, id: &str) {
+    let path = if let Ok(mut records) = manager.records.lock() {
+        records.get_mut(id).and_then(|record| record.cookies_file.take())
+    } else { None };
+    if let Some(path) = path { let _ = std::fs::remove_file(path); }
+    persist_records(manager);
 }
 
 fn partial_bytes_for(record: &DownloadRecord) -> u64 {
@@ -212,6 +254,23 @@ fn set_file_path(manager: &DownloadManager, id: &str, path: &Path) {
     persist_records(manager);
 }
 
+fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &MediaProgress) {
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            record.downloaded.store(progress.downloaded_bytes, Ordering::Relaxed);
+            if let Some(total) = progress.total_bytes.filter(|value| *value > 0) {
+                record.total = Some(total);
+            }
+            record.progress_override = Some(progress.progress.clamp(0.0, 100.0));
+            if progress.downloaded_bytes > 0 && record.status != "Downloading" {
+                record.started = Instant::now();
+                record.status = "Downloading".into();
+                record.error = None;
+            }
+        }
+    }
+}
+
 fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
     let fields: Vec<&str> = data.split('|').collect();
     let downloaded = fields.first().and_then(|value| value.parse::<u64>().ok());
@@ -258,7 +317,7 @@ fn set_progress(manager: &DownloadManager, id: &str, progress: f64) {
 
 fn spawn_download_task(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
-    destination: PathBuf, concurrency: usize, cancel: CancellationToken,
+    destination: PathBuf, concurrency: usize, cookies_file: Option<String>, cancel: CancellationToken,
 ) {
     tauri::async_runtime::spawn(async move {
         let saver_manager = manager.clone();
@@ -273,11 +332,14 @@ fn spawn_download_task(
             }
         });
         let result = execute_download(app, manager.clone(), id.clone(), url, kind,
-            destination, concurrency, cancel.clone()).await;
+            destination, concurrency, cookies_file, cancel.clone()).await;
         cancel.cancel();
         let _ = saver.await;
         match result {
-            Ok(()) => set_status(&manager, &id, "Completed", None),
+            Ok(()) => {
+                set_status(&manager, &id, "Completed", None);
+                cleanup_job_cookies(&manager, &id);
+            },
             Err(error) if error == "Cancelled" => set_status(&manager, &id, "Paused", None),
             Err(error) => set_status(&manager, &id, "Failed", Some(error)),
         }
@@ -287,7 +349,7 @@ fn spawn_download_task(
 #[tauri::command]
 async fn start_download(
     app: AppHandle, manager: State<'_, DownloadManager>, url: String, kind: String,
-    destination: Option<String>, concurrency: Option<usize>,
+    destination: Option<String>, concurrency: Option<usize>, cookies: Option<String>,
 ) -> Result<DownloadView, String> {
     if url.len() > 8192 { return Err("The download URL is too long.".into()); }
     let parsed = Url::parse(&url).map_err(|_| "Enter a valid http:// or https:// URL.".to_string())?;
@@ -307,6 +369,7 @@ async fn start_download(
         _ => default_destination,
     };
     let id = Uuid::new_v4().simple().to_string();
+    let cookies_file = write_job_cookies(&app, &id, cookies)?;
     let requested = concurrency.unwrap_or(2).clamp(1, 8);
     let cancel = CancellationToken::new();
     let record = DownloadRecord {
@@ -317,12 +380,13 @@ async fn start_download(
         downloaded: Arc::new(AtomicU64::new(0)), total: None, started: Instant::now(),
         error: None, cancel: cancel.clone(), progress_override: None,
         concurrency: requested, etag: None, last_modified: None,
+        cookies_file: cookies_file.clone(),
     };
     let initial = view_of(&record);
     let manager = manager.inner().clone();
     manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?.insert(id.clone(), record);
     persist_records(&manager);
-    spawn_download_task(app, manager, id, url, kind, destination_path, requested, cancel);
+    spawn_download_task(app, manager, id, url, kind, destination_path, requested, cookies_file, cancel);
     Ok(initial)
 }
 
@@ -330,7 +394,7 @@ async fn start_download(
 fn resume_download(
     app: AppHandle, manager: State<'_, DownloadManager>, id: String,
 ) -> Result<DownloadView, String> {
-    let (url, kind, destination, concurrency, cancel, view) = {
+    let (url, kind, destination, concurrency, cookies_file, cancel, view) = {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
         if record.status == "Completed" { return Err("This download is already complete.".into()); }
@@ -347,10 +411,10 @@ fn resume_download(
         record.progress_override = None;
         let destination = PathBuf::from(&record.destination);
         let view = view_of(record);
-        (record.url.clone(), record.kind.clone(), destination, record.concurrency, cancel, view)
+        (record.url.clone(), record.kind.clone(), destination, record.concurrency, record.cookies_file.clone(), cancel, view)
     };
     persist_records(manager.inner());
-    spawn_download_task(app, manager.inner().clone(), id, url, kind, destination, concurrency, cancel);
+    spawn_download_task(app, manager.inner().clone(), id, url, kind, destination, concurrency, cookies_file, cancel);
     Ok(view)
 }
 
@@ -388,6 +452,9 @@ async fn pause_download(app: AppHandle, manager: State<'_, DownloadManager>, id:
 #[tauri::command]
 fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
     let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+    for item in records.values().filter(|item| matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled")) {
+        if let Some(path) = item.cookies_file.as_ref() { let _ = std::fs::remove_file(path); }
+    }
     records.retain(|_, item| !matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled"));
     drop(records);
     persist_records(manager.inner());
@@ -440,7 +507,7 @@ async fn check_engines(_app: AppHandle) -> Vec<ToolStatus> {
 
 async fn execute_download(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
-    destination: PathBuf, concurrency: usize, cancel: CancellationToken,
+    destination: PathBuf, concurrency: usize, cookies_file: Option<String>, cancel: CancellationToken,
 ) -> Result<(), String> {
     let _permit = tokio::select! {
         _ = cancel.cancelled() => return Err("Cancelled".into()),
@@ -466,7 +533,7 @@ async fn execute_download(
         && (needs_media_extractor(&parsed) || looks_like_html_page(&client, &url).await);
     if media_page {
         set_status(&manager, &id, "Extracting media", None);
-        return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, &cancel).await;
+        return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, cookies_file.as_deref(), &cancel).await;
     }
     let name = suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8]));
     let target = unique_path(&manager, &id, &destination, &name)?;
@@ -478,8 +545,9 @@ async fn execute_download(
 }
 
 async fn looks_like_html_page(client: &Client, url: &str) -> bool {
-    let head = client.head(url).send().await;
-    if let Ok(response) = head {
+    let timeout = std::time::Duration::from_secs(8);
+    let head = tokio::time::timeout(timeout, client.head(url).send()).await;
+    if let Ok(Ok(response)) = head {
         if response.status().is_success() {
             return response.headers().get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
@@ -490,8 +558,8 @@ async fn looks_like_html_page(client: &Client, url: &str) -> bool {
         }
     }
     // Some download hosts reject HEAD; a one-byte range request is a fallback.
-    match client.get(url).header(header::RANGE, "bytes=0-0").send().await {
-        Ok(response) if response.status().is_success() || response.status() == StatusCode::PARTIAL_CONTENT =>
+    match tokio::time::timeout(timeout, client.get(url).header(header::RANGE, "bytes=0-0").send()).await {
+        Ok(Ok(response)) if response.status().is_success() || response.status() == StatusCode::PARTIAL_CONTENT =>
             response.headers().get(header::CONTENT_TYPE)
                 .and_then(|value| value.to_str().ok())
                 .map(|value| {
@@ -513,6 +581,8 @@ fn needs_media_extractor(url: &Url) -> bool {
         "streamable.com", "loom.com", "bilibili.com", "b23.tv", "ok.ru", "rutube.ru",
         "bandcamp.com", "mixcloud.com", "rumble.com", "odysee.com", "pinterest.com",
         "pinterest.co.uk", "archive.org", "kick.com", "vk.com", "snapchat.com",
+        "instagr.am", "threads.net", "t.me", "telegram.me", "telegram.org",
+        "clips.twitch.tv", "fb.com", "fb.gg", "facebook.watch",
     ];
     if known.iter().any(|domain| host == *domain || host.ends_with(&format!(".{domain}"))) { return true; }
     let path = url.path().to_ascii_lowercase();
@@ -623,7 +693,10 @@ async fn download_http(
     let parts_dir = destination.join(format!(".downbest-{id}"));
     let previous_len = fs::metadata(&temp).await.map(|meta| meta.len()).unwrap_or(0);
     let (previous_etag, previous_modified) = saved_validators(manager, id);
-    let probe = client.get(url).header(header::RANGE, "bytes=0-0").send().await
+    let probe = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        client.get(url).header(header::RANGE, "bytes=0-0").send(),
+    ).await.map_err(|_| "The server did not respond to the download probe within 30 seconds.".to_string())?
         .map_err(|e| format!("Connection failed: {e}"))?;
     let current_etag = probe.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
     let current_modified = probe.headers().get(header::LAST_MODIFIED).and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -856,14 +929,14 @@ async fn download_piece(
 #[cfg(target_os = "android")]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
-    destination: &Path, concurrency: usize, cancel: &CancellationToken,
+    destination: &Path, concurrency: usize, cookies_file: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let progress_manager = manager.clone();
     let progress_id = id.to_string();
     let on_progress = tauri::ipc::Channel::new(move |body| {
         if let Ok(progress) = body.deserialize::<MediaProgress>() {
-            set_progress(&progress_manager, &progress_id, progress.progress);
+            update_mobile_media_progress(&progress_manager, &progress_id, &progress);
         }
         Ok(())
     });
@@ -873,6 +946,7 @@ async fn run_media_download(
         job_id: id.to_string(),
         kind: kind.to_string(),
         concurrency: concurrency.min(16),
+        cookies_file: cookies_file.map(str::to_string),
         on_progress,
     };
     let app_handle = app.clone();
@@ -895,7 +969,7 @@ async fn run_media_download(
 #[cfg(target_os = "ios")]
 async fn run_media_download(
     _app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, _kind: &str,
-    destination: &Path, _concurrency: usize, cancel: &CancellationToken,
+    destination: &Path, _concurrency: usize, _cookies_file: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     if url.path().to_ascii_lowercase().ends_with(".m3u8") {
         return download_open_hls(url, destination, id, manager, cancel).await;
@@ -906,7 +980,7 @@ async fn run_media_download(
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
-    destination: &Path, concurrency: usize, cancel: &CancellationToken,
+    destination: &Path, concurrency: usize, cookies_file: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     let yt_dlp = find_tool(app, "yt-dlp").ok_or_else(||
         "yt-dlp was not found. Install yt-dlp or place it in the app's tools folder to download from media sites.".to_string())?;
@@ -933,6 +1007,9 @@ async fn run_media_download(
             command.arg("-f").arg("bestvideo+bestaudio/best").arg("--merge-output-format").arg("mp4");
         }
         _ => { command.arg("-f").arg("best[ext=mp4]/best"); }
+    }
+    if let Some(cookie_path) = cookies_file {
+        command.arg("--cookies").arg(cookie_path);
     }
     if let Some(aria_path) = aria2 {
         // aria2c handles HTTP/FTP media transfers; yt-dlp's native downloader
