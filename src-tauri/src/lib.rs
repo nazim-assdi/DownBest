@@ -178,7 +178,8 @@ fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
 #[tauri::command]
 async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
     let mut result = Vec::new();
-    for name in ["yt-dlp", "aria2c", "ffmpeg"] {
+    result.push(ToolStatus { name: "Native HTTP".into(), available: true, version: Some("Built-in".into()) });
+    for name in ["yt-dlp", "aria2c", "ffmpeg", "ffprobe"] {
         if let Some(path) = find_tool(&app, name) {
             let mut command = Command::new(&path);
             configure_tool_environment(&mut command, &path);
@@ -193,12 +194,28 @@ async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
     result
 }
 
-#[cfg(any(target_os = "android", target_os = "ios"))]
+#[cfg(target_os = "android")]
 #[tauri::command]
 async fn check_engines(_app: AppHandle) -> Vec<ToolStatus> {
-    ["yt-dlp", "aria2c", "ffmpeg"].into_iter()
-        .map(|name| ToolStatus { name: name.into(), available: false, version: None })
-        .collect()
+    vec![
+        ToolStatus { name: "Native HTTP".into(), available: true, version: Some("Built-in".into()) },
+        ToolStatus { name: "yt-dlp".into(), available: true, version: Some("Embedded Python runtime".into()) },
+        ToolStatus { name: "aria2c".into(), available: false, version: None },
+        ToolStatus { name: "ffmpeg".into(), available: true, version: Some("Embedded FFmpegKit".into()) },
+        ToolStatus { name: "ffprobe".into(), available: true, version: Some("Embedded FFmpegKit".into()) },
+    ]
+}
+
+#[cfg(target_os = "ios")]
+#[tauri::command]
+async fn check_engines(_app: AppHandle) -> Vec<ToolStatus> {
+    vec![
+        ToolStatus { name: "Native HTTP".into(), available: true, version: Some("Built-in".into()) },
+        ToolStatus { name: "Native HLS".into(), available: true, version: Some("Open VOD playlists".into()) },
+        ToolStatus { name: "yt-dlp".into(), available: false, version: None },
+        ToolStatus { name: "aria2c".into(), available: false, version: None },
+        ToolStatus { name: "ffmpeg".into(), available: false, version: None },
+    ]
 }
 
 async fn execute_download(
