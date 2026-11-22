@@ -37,7 +37,7 @@ function toast(message: string, error = false) {
 }
 
 root.innerHTML = '<div class="layout">' +
-  '<aside class="sidebar"><div class="brand"><div class="brand-mark">D</div><div><b>DownBest</b><small>DOWNLOAD MANAGER</small></div></div>' +
+  '<aside class="sidebar"><div class="brand"><div class="brand-mark">D</div><div><b>DownBest Lite</b><small>DOWNLOAD MANAGER</small></div></div>' +
   '<div class="side-label">WORKSPACE</div><div class="nav active">' + icons.download + '<span>Downloads</span><b id="active-count">0</b></div>' +
   '<div class="side-tip"><div class="tip-icon">' + icons.bolt + '</div><b>Smart acceleration</b><p>Adaptive parallel connections for compatible file servers.</p></div>' +
   '<div class="sidebar-foot"><span>PRIVATE BY DESIGN</span><small>DOWNBEST 1.0.0</small></div></aside>' +
@@ -51,7 +51,7 @@ root.innerHTML = '<div class="layout">' +
   '<p class="note">Lite is recommended for everyday use: fewer connections, two active jobs, buffered writes and lower CPU load. Higher modes use more resources.</p></form></section>' +
   '<section class="engines"><b>DOWNLOAD ENGINES</b><div id="engine-list">Checking available tools…</div></section>' +
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">ACTIVITY</span><h2>Download queue <i id="queue-count">0</i></h2></div><button id="clear">Clear completed</button></div><div id="download-list" class="download-list"></div></section>' +
-  '<footer><span>DOWNBEST · Built for speed, designed for control.</span><span>Windows · macOS · Linux · Android · iOS</span></footer></main></div><div id="toast" class="toast"></div>';
+  '<footer><span>DOWNBEST LITE · Fast downloads, lighter CPU use.</span><span>Windows · macOS · Linux · Android · iOS</span></footer></main></div><div id="toast" class="toast"></div>';
 
 function renderTools(tools: Tool[]) {
   const el = document.querySelector<HTMLDivElement>("#engine-list")!;
