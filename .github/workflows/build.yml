@@ -179,8 +179,15 @@ jobs:
           if not changed:
               raise SystemExit("Could not locate compileSdk in generated Android app/build.gradle.kts")
           content = re.sub(r"(?m)^(\s*targetSdk\s*=\s*)\d+", r"\g<1>36", content, count=1)
+          content, abi_changed = re.subn(
+              r"(?m)^(\\s*defaultConfig\\s*\\{)",
+              r'\\1\\n        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }',
+              content, count=1
+          )
+          if not abi_changed:
+              raise SystemExit("Could not restrict Android ABI filters to supported 64-bit targets")
           gradle.write_text(content)
-          print("Android compileSdk/targetSdk set to API 36")
+          print("Android compileSdk/targetSdk API 36; ABI filters: arm64-v8a, x86_64")
           PY
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
@@ -258,8 +265,6 @@ jobs:
             abi_dir="${abi_dir%%/*}"
             case "$abi_dir" in
               arm64) native_abi="arm64-v8a" ;;
-              arm) native_abi="armeabi-v7a" ;;
-              x86) native_abi="x86" ;;
               x86_64) native_abi="x86_64" ;;
               *) echo "Unexpected APK ABI folder: $abi_dir" >&2; exit 1 ;;
             esac
