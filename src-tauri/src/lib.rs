@@ -180,7 +180,9 @@ async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
     let mut result = Vec::new();
     for name in ["yt-dlp", "aria2c", "ffmpeg"] {
         if let Some(path) = find_tool(&app, name) {
-            let output = Command::new(path).arg("--version").output().await.ok();
+            let mut command = Command::new(&path);
+            configure_tool_environment(&mut command, &path);
+            let output = command.arg("--version").output().await.ok();
             let version = output.map(|o| String::from_utf8_lossy(&o.stdout).lines().next()
                 .unwrap_or("Available").trim().to_string()).filter(|v| !v.is_empty());
             result.push(ToolStatus { name: name.into(), available: true, version });
@@ -495,6 +497,7 @@ async fn run_media_download(
     let has_ffmpeg = find_tool(app, "ffmpeg").is_some();
     let aria2 = find_tool(app, "aria2c");
     let mut command = Command::new(&yt_dlp);
+    configure_tool_environment(&mut command, &yt_dlp);
     command.arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
         .arg("--retries").arg("10").arg("--fragment-retries").arg("10")
         .arg("--file-access-retries").arg("3").arg("-N").arg(concurrency.to_string())
