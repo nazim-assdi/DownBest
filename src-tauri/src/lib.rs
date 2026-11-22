@@ -488,26 +488,27 @@ fn get_downloads(manager: State<'_, DownloadManager>) -> Result<Vec<DownloadView
 }
 #[tauri::command]
 async fn pause_download(app: AppHandle, manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
-    let was_media = {
+    {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
-        if matches!(record.status.as_str(), "Completed" | "Paused" | "Failed") { return Ok(()); }
-        let media = record.status == "Extracting media";
+        if matches!(record.status.as_str(), "Completed" | "Paused" | "Failed" | "Cancelled") { return Ok(()); }
         record.status = "Pausing".into();
         record.cancel.cancel();
-        media
-    };
+    }
     persist_records(manager.inner());
+    // On Android the media progress callback also changes the visible status
+    // to Downloading. Always ask the native plugin to stop an extractor job;
+    // for a direct HTTP job it simply returns cancelled=false.
     #[cfg(target_os = "android")]
-    if was_media {
+    {
         let handle = app.clone();
         let job_id = id.clone();
         tokio::task::spawn_blocking(move || handle.media().cancel(MediaCancelRequest { job_id }))
             .await.map_err(|e| format!("Android media cancellation worker failed: {e}"))?
-            .map_err(|e| format!("Could not pause Android media download: {e}"))?;
+            .map_err(|e| format!("Could not pause Android download: {e}"))?;
     }
     #[cfg(not(target_os = "android"))]
-    let _ = (app, was_media);
+    let _ = app;
     Ok(())
 }
 #[tauri::command]
