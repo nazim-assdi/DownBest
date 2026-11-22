@@ -286,7 +286,7 @@ async fn execute_download(
         return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, &cancel).await;
     }
     let name = suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8]));
-    let target = unique_path(&destination, &name);
+    let target = unique_path(&manager, &id, &destination, &name)?;
     set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     set_status(&manager, &id, "Downloading", None);
     download_http(&client, &url, &target, &destination, &id, concurrency, &manager, &cancel).await?;
@@ -343,18 +343,36 @@ fn suggested_name(url: &Url) -> Option<String> {
     let safe = safe.trim().trim_matches('.').to_string();
     if safe.is_empty() { None } else { Some(safe) }
 }
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
+fn unique_path(manager: &DownloadManager, id: &str, dir: &Path, name: &str) -> Result<PathBuf, String> {
     let original = Path::new(name);
     let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
     let extension = original.extension().and_then(|s| s.to_str());
+    let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
     for index in 0..10_000 {
         let candidate = if index == 0 { name.to_string() }
             else if let Some(ext) = extension { format!("{stem} ({index}).{ext}") }
             else { format!("{stem} ({index})") };
         let path = dir.join(candidate);
-        if !path.exists() { return path; }
+        let path_text = path.to_string_lossy().into_owned();
+        let reserved = records.values().any(|record| {
+            record.file_path.as_ref().map(|existing| {
+                if cfg!(windows) { existing.eq_ignore_ascii_case(&path_text) }
+                else { existing == &path_text }
+            }).unwrap_or(false)
+        });
+        if !path.exists() && !reserved {
+            let record = records.get_mut(id).ok_or_else(|| "Download record was not found.".to_string())?;
+            record.file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or(name).to_string();
+            record.file_path = Some(path_text);
+            return Ok(path);
+        }
     }
-    dir.join(format!("{}-{}", Uuid::new_v4(), name))
+    let path = dir.join(format!("{}-{}", Uuid::new_v4(), name));
+    let path_text = path.to_string_lossy().into_owned();
+    let record = records.get_mut(id).ok_or_else(|| "Download record was not found.".to_string())?;
+    record.file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or(name).to_string();
+    record.file_path = Some(path_text);
+    Ok(path)
 }
 fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
     const MIN_PARALLEL_FILE: u64 = 16 * 1024 * 1024;
@@ -582,7 +600,7 @@ async fn run_media_download(
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
-        .arg("-P").arg(destination).arg("-o").arg("%(title).180B [%(id)s].%(ext)s");
+        .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
     match kind {
         "audio" => { command.arg("-f").arg("bestaudio/best"); }
         "video-only" => { command.arg("-f").arg("bestvideo"); }
@@ -749,7 +767,7 @@ async fn download_open_hls(
     let extension = if map_uri.is_some() { "mp4" } else { "ts" };
     let base_name = suggested_name(source).unwrap_or_else(|| format!("hls-{}", &id[..8]));
     let stem = Path::new(&base_name).file_stem().and_then(|v| v.to_str()).unwrap_or("hls");
-    let target = unique_path(destination, &format!("{stem}.{extension}"));
+    let target = unique_path(manager, id, destination, &format!("{stem}.{extension}"))?;
     set_file_name(manager, id, target.file_name().and_then(|v| v.to_str()).unwrap_or("stream.ts"));
 
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
@@ -871,7 +889,46 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::effective_segment_count;
+    use super::{effective_segment_count, unique_path, DownloadManager, DownloadRecord};
+    use std::{sync::{atomic::AtomicU64, Arc}, time::Instant};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    fn queued_record(id: &str) -> DownloadRecord {
+        DownloadRecord {
+            id: id.to_string(),
+            url: "https://example.com/file.zip".into(),
+            file_name: "file.zip".into(),
+            kind: "file".into(),
+            status: "Queued".into(),
+            destination: String::new(),
+            file_path: None,
+            downloaded: Arc::new(AtomicU64::new(0)),
+            total: None,
+            started: Instant::now(),
+            error: None,
+            cancel: CancellationToken::new(),
+            progress_override: None,
+        }
+    }
+
+    #[test]
+    fn concurrent_same_name_downloads_reserve_distinct_paths() {
+        let folder = std::env::temp_dir().join(format!("downbest-path-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create test directory");
+        let manager = DownloadManager::default();
+        {
+            let mut records = manager.records.lock().expect("lock queue");
+            records.insert("first".into(), queued_record("first"));
+            records.insert("second".into(), queued_record("second"));
+        }
+        let first = unique_path(&manager, "first", &folder, "same.zip").expect("reserve first path");
+        let second = unique_path(&manager, "second", &folder, "same.zip").expect("reserve second path");
+        assert_ne!(first, second);
+        assert_eq!(first.file_name().and_then(|value| value.to_str()), Some("same.zip"));
+        assert_eq!(second.file_name().and_then(|value| value.to_str()), Some("same (1).zip"));
+        std::fs::remove_dir_all(folder).expect("remove test directory");
+    }
 
     #[test]
     fn lite_mode_uses_one_stream_for_small_files() {
