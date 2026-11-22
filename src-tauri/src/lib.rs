@@ -10,7 +10,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::AsyncWriteExt,
+    io::{AsyncWriteExt, BufWriter},
     sync::Semaphore,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -28,7 +28,7 @@ struct DownloadManager {
 }
 impl Default for DownloadManager {
     fn default() -> Self {
-        Self { records: Arc::new(Mutex::new(HashMap::new())), slots: Arc::new(Semaphore::new(3)) }
+        Self { records: Arc::new(Mutex::new(HashMap::new())), slots: Arc::new(Semaphore::new(2)) }
     }
 }
 
@@ -85,10 +85,13 @@ fn set_file_name(manager: &DownloadManager, id: &str, name: &str) {
         if let Some(record) = records.get_mut(id) { record.file_name = name.to_string(); }
     }
 }
-fn add_progress(manager: &DownloadManager, id: &str, amount: u64) {
-    if let Ok(records) = manager.records.lock() {
-        if let Some(record) = records.get(id) { record.downloaded.fetch_add(amount, Ordering::Relaxed); }
-    }
+fn progress_counter(manager: &DownloadManager, id: &str) -> Result<Arc<AtomicU64>, String> {
+    let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+    records.get(id).map(|record| record.downloaded.clone())
+        .ok_or_else(|| "Download record was not found.".to_string())
+}
+fn add_progress(progress: &AtomicU64, amount: u64) {
+    progress.fetch_add(amount, Ordering::Relaxed);
 }
 fn reset_progress(manager: &DownloadManager, id: &str) {
     if let Ok(records) = manager.records.lock() {
@@ -141,7 +144,7 @@ async fn start_download(
 
     let task_manager = manager.clone();
     let task_id = id.clone();
-    let requested = concurrency.unwrap_or(8).clamp(1, 32);
+    let requested = concurrency.unwrap_or(2).clamp(1, 8);
     tauri::async_runtime::spawn(async move {
         let result = execute_download(app, task_manager.clone(), task_id.clone(), url, kind,
             destination_path, requested, cancel).await;
@@ -232,7 +235,7 @@ async fn execute_download(
     let parsed = Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
     let client = Client::builder().user_agent("DownBest/1.0 (+https://github.com/nazim-assdi/DownBest)")
         .connect_timeout(std::time::Duration::from_secs(20))
-        .pool_idle_timeout(std::time::Duration::from_secs(90)).pool_max_idle_per_host(32)
+        .pool_idle_timeout(std::time::Duration::from_secs(45)).pool_max_idle_per_host(8)
         .default_headers({
             let mut headers = header::HeaderMap::new();
             headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("identity"));
@@ -333,10 +336,11 @@ async fn download_http(
         let total = parse_content_range(probe.headers().get(header::CONTENT_RANGE))
             .ok_or_else(|| "The server returned an invalid Content-Range header.".to_string())?;
         set_total(manager, id, Some(total));
-        let count = concurrency.min(((total / (2 * 1024 * 1024)).max(1)) as usize).min(32);
-        if total >= 4 * 1024 * 1024 && count > 1 {
+        let count = concurrency.min(((total / (8 * 1024 * 1024)).max(1)) as usize).min(8);
+        if total >= 16 * 1024 * 1024 && count > 1 {
             drop(probe);
-            match download_segmented(client, url, target, destination, id, total, count, manager, cancel).await {
+            let progress = progress_counter(manager, id)?;
+            match download_segmented(client, url, target, destination, id, total, count, manager, progress, cancel).await {
                 Ok(()) => Ok(()),
                 Err(error) if error == "Cancelled" => Err(error),
                 Err(_range_error) => {
@@ -348,41 +352,46 @@ async fn download_http(
                     if !response.status().is_success() {
                         return Err(format!("Parallel download failed and fallback returned HTTP {}", response.status()));
                     }
-                    stream_to_target(response, target, id, manager, cancel).await
+                    stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel).await
                 }
             }
         } else {
             drop(probe);
             let response = client.get(url).send().await.map_err(|e| format!("Download request failed: {e}"))?;
             if !response.status().is_success() { return Err(format!("Server returned HTTP {}", response.status())); }
-            stream_to_target(response, target, id, manager, cancel).await
+            stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel).await
         }
     } else if probe.status().is_success() {
         let total = probe.content_length();
         set_total(manager, id, total);
-        stream_to_target(probe, target, id, manager, cancel).await
+        stream_to_target(probe, target, id, manager, progress_counter(manager, id)?, cancel).await
     } else {
         Err(format!("Server returned HTTP {} while checking range support.", probe.status()))
     }
 }
 
 async fn stream_to_target(
-    response: Response, target: &Path, id: &str, manager: &DownloadManager,
-    cancel: &CancellationToken,
+    response: Response, target: &Path, id: &str, _manager: &DownloadManager,
+    progress: Arc<AtomicU64>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
-    let mut file = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
+    let file = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
+    let mut file = BufWriter::with_capacity(256 * 1024, file);
     let mut stream = response.bytes_stream();
     while let Some(chunk) = tokio::select! {
-        _ = cancel.cancelled() => return Err("Cancelled".into()),
+        _ = cancel.cancelled() => {
+            drop(file);
+            let _ = fs::remove_file(&temp).await;
+            return Err("Cancelled".into());
+        },
         item = stream.next() => item,
     } {
         let chunk = chunk.map_err(|e| format!("Network stream interrupted: {e}"))?;
         file.write_all(&chunk).await.map_err(|e| format!("Disk write failed: {e}"))?;
-        add_progress(manager, id, chunk.len() as u64);
+        add_progress(&progress, chunk.len() as u64);
     }
     file.flush().await.map_err(|e| format!("Could not flush file: {e}"))?;
-    file.sync_all().await.map_err(|e| format!("Could not sync file: {e}"))?;
+    file.get_ref().sync_all().await.map_err(|e| format!("Could not sync file: {e}"))?;
     drop(file);
     fs::rename(&temp, target).await.map_err(|e| format!("Could not finalize download: {e}"))?;
     Ok(())
@@ -390,7 +399,8 @@ async fn stream_to_target(
 
 async fn download_segmented(
     client: &Client, url: &str, target: &Path, destination: &Path, id: &str,
-    total: u64, count: usize, manager: &DownloadManager, cancel: &CancellationToken,
+    total: u64, count: usize, manager: &DownloadManager, progress: Arc<AtomicU64>,
+    cancel: &CancellationToken,
 ) -> Result<(), String> {
     let parts_dir = destination.join(format!(".downbest-{id}"));
     fs::create_dir_all(&parts_dir).await.map_err(|e| format!("Cannot create temporary folder: {e}"))?;
@@ -406,8 +416,9 @@ async fn download_segmented(
         let manager = manager.clone();
         let id = id.to_string();
         let cancel = cancel.clone();
+        let progress = progress.clone();
         jobs.push(async move {
-            download_piece(client, url, start, end, part_path.clone(), &id, manager, cancel).await?;
+            download_piece(client, url, start, end, part_path.clone(), &id, manager, progress, cancel).await?;
             Ok::<PathBuf, String>(part_path)
         });
     }
@@ -418,13 +429,14 @@ async fn download_segmented(
     };
     if cancel.is_cancelled() { let _ = fs::remove_dir_all(&parts_dir).await; return Err("Cancelled".into()); }
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
-    let mut output = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
+    let output = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
+    let mut output = BufWriter::with_capacity(256 * 1024, output);
     for part_path in parts {
         let mut part = File::open(&part_path).await.map_err(|e| format!("A download segment is missing: {e}"))?;
         tokio::io::copy(&mut part, &mut output).await.map_err(|e| format!("Could not assemble download: {e}"))?;
     }
     output.flush().await.map_err(|e| format!("Could not flush output: {e}"))?;
-    output.sync_all().await.map_err(|e| format!("Could not sync output: {e}"))?;
+    output.get_ref().sync_all().await.map_err(|e| format!("Could not sync output: {e}"))?;
     drop(output);
     fs::rename(&temp, target).await.map_err(|e| format!("Could not finalize download: {e}"))?;
     fs::remove_dir_all(&parts_dir).await.ok();
@@ -433,7 +445,7 @@ async fn download_segmented(
 
 async fn download_piece(
     client: Client, url: String, start: u64, end: u64, path: PathBuf, id: &str,
-    manager: DownloadManager, cancel: CancellationToken,
+    manager: DownloadManager, progress: Arc<AtomicU64>, cancel: CancellationToken,
 ) -> Result<(), String> {
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let response = client.get(&url).header(header::RANGE, format!("bytes={start}-{end}"))
@@ -441,8 +453,9 @@ async fn download_piece(
     if response.status() != StatusCode::PARTIAL_CONTENT {
         return Err(format!("Server stopped supporting parallel ranges (HTTP {}). Try a lower speed profile.", response.status()));
     }
-    let mut file = OpenOptions::new().create(true).truncate(true).write(true).open(&path)
+    let file = OpenOptions::new().create(true).truncate(true).write(true).open(&path)
         .await.map_err(|e| format!("Cannot create segment file: {e}"))?;
+    let mut file = BufWriter::with_capacity(256 * 1024, file);
     let mut stream = response.bytes_stream();
     let mut received = 0u64;
     while let Some(chunk) = tokio::select! {
@@ -452,9 +465,10 @@ async fn download_piece(
         let chunk = chunk.map_err(|e| format!("Segment interrupted: {e}"))?;
         received += chunk.len() as u64;
         file.write_all(&chunk).await.map_err(|e| format!("Segment disk write failed: {e}"))?;
-        add_progress(&manager, id, chunk.len() as u64);
+        add_progress(&progress, chunk.len() as u64);
     }
     file.flush().await.map_err(|e| format!("Cannot flush segment: {e}"))?;
+    file.get_ref().sync_all().await.map_err(|e| format!("Cannot sync segment: {e}"))?;
     let expected = end - start + 1;
     if received != expected { return Err(format!("Segment size mismatch: expected {expected} bytes, received {received}.")); }
     Ok(())
@@ -518,6 +532,7 @@ async fn run_media_download(
     command.arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
         .arg("--retries").arg("10").arg("--fragment-retries").arg("10")
         .arg("--file-access-retries").arg("3").arg("-N").arg(concurrency.to_string())
+        .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.speed)s")
         .arg("-P").arg(destination).arg("-o").arg("%(title).180B [%(id)s].%(ext)s");
     match kind {
@@ -537,7 +552,7 @@ async fn run_media_download(
         // handles DASH/HLS fragments so fragment scheduling remains protocol-aware.
         command.arg("--downloader").arg("aria2c")
             .arg("--downloader").arg("dash,m3u8:native")
-            .arg("--downloader-args").arg("aria2c:-c -x 16 -s 16 -k 1M");
+            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 2M", concurrency.clamp(2, 8), concurrency.clamp(2, 8)));
         if let Some(parent) = aria_path.parent() {
             let mut paths = vec![parent.to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
@@ -655,7 +670,9 @@ async fn download_open_hls(
     set_file_name(manager, id, target.file_name().and_then(|v| v.to_str()).unwrap_or("stream.ts"));
 
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
-    let mut output = File::create(&temp).await.map_err(|e| format!("Cannot create HLS output: {e}"))?;
+    let output = File::create(&temp).await.map_err(|e| format!("Cannot create HLS output: {e}"))?;
+    let mut output = BufWriter::with_capacity(128 * 1024, output);
+    let progress = progress_counter(manager, id)?;
 
     if let Some(uri) = map_uri {
         let map_url = media_url.join(&uri).map_err(|e| format!("Invalid HLS init segment URL: {e}"))?;
@@ -663,7 +680,7 @@ async fn download_open_hls(
         if !response.status().is_success() { return Err(format!("HLS init segment returned HTTP {}", response.status())); }
         let bytes = response.bytes().await.map_err(|e| format!("Could not read HLS init segment: {e}"))?;
         output.write_all(&bytes).await.map_err(|e| format!("Could not write HLS init segment: {e}"))?;
-        add_progress(manager, id, bytes.len() as u64);
+        add_progress(&progress, bytes.len() as u64);
     }
 
     let total_segments = media.segments.len();
@@ -680,11 +697,11 @@ async fn download_open_hls(
         }
         let bytes = response.bytes().await.map_err(|e| format!("Could not read HLS segment {}: {e}", index + 1))?;
         output.write_all(&bytes).await.map_err(|e| format!("Could not write HLS segment {}: {e}", index + 1))?;
-        add_progress(manager, id, bytes.len() as u64);
+        add_progress(&progress, bytes.len() as u64);
         set_progress(manager, id, ((index + 1) as f64 / total_segments as f64) * 100.0);
     }
     output.flush().await.map_err(|e| format!("Could not flush HLS output: {e}"))?;
-    output.sync_all().await.map_err(|e| format!("Could not sync HLS output: {e}"))?;
+    output.get_ref().sync_all().await.map_err(|e| format!("Could not sync HLS output: {e}"))?;
     drop(output);
     fs::rename(&temp, &target).await.map_err(|e| format!("Could not finalize HLS output: {e}"))?;
     Ok(())
