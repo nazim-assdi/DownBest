@@ -179,13 +179,6 @@ jobs:
           if not changed:
               raise SystemExit("Could not locate compileSdk in generated Android app/build.gradle.kts")
           content = re.sub(r"(?m)^(\s*targetSdk\s*=\s*)\d+", r"\g<1>36", content, count=1)
-          content, abi_changed = re.subn(
-              r"(?m)^([ \t]*defaultConfig[ \t]*\{)",
-              r'\1\n        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }',
-              content, count=1
-          )
-          if not abi_changed:
-              raise SystemExit("Could not restrict Android ABI filters to supported 64-bit targets")
           gradle.write_text(content)
           print("Android compileSdk/targetSdk API 36; ABI filters: arm64-v8a, x86_64")
           PY
@@ -206,6 +199,10 @@ jobs:
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           keystore="$RUNNER_TEMP/downbest-signing.keystore"
 
+          # The embedded yt-dlp runtime is distributed for 64-bit Android only.
+          # Tauri may still emit 32-bit split APKs; do not sign or publish them.
+          find "$apk_dir" -type f -name '*-unsigned.apk' \
+            \( -path '*/arm/*' -o -path '*/x86/*' \) -delete
           mapfile -t unsigned_apks < <(find "$apk_dir" -type f -name '*-unsigned.apk' -print | sort)
           if [ "${#unsigned_apks[@]}" -eq 0 ]; then
             echo "No unsigned APKs were produced." >&2
