@@ -22,6 +22,9 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Bundled FFmpeg is used by yt-dlp to merge separate audio and video streams.
 - Desktop users can choose the save folder with the native folder picker and reveal completed files in the system file manager. The default folder is Downloads.
 - App-specific private storage is used as the default destination on Android/iOS; the desktop folder picker is not shown on mobile.
+- Persistent download queue stored in the app-data folder; unfinished jobs return as Paused after an app/PC restart and can be resumed from the queue.
+- Direct HTTP(S) downloads keep durable partial files, validate byte-range offsets, use ETag/Last-Modified validators when available, and sync partial data to disk periodically.
+- Desktop yt-dlp downloads use a stable per-job output template and yt-dlp's `--continue` support so supported media downloads can continue from their .part data.
 - One Tauri 2 codebase and one Git branch: `main`.
 
 ## Supported targets and current limits
@@ -95,7 +98,7 @@ Packages are uploaded to the corresponding GitHub Actions run as workflow artifa
 
 Lite mode is recommended for everyday use on lower-powered PCs: it uses 2 requested HTTP connections, 2 simultaneous jobs, 256 KiB buffered disk writes, atomic progress updates, fewer idle pooled connections and a 1.5-second UI refresh while visible. Files below 16 MiB use a single connection; larger files may use up to 2 range connections. Balanced and High throughput modes can use 4 or 8 requested connections. These are limits, not guaranteed multipliers; actual throughput depends on ISP bandwidth, server/CDN limits, protocol, file size, disk and CPU. If a host rejects range requests, DownBest falls back to one stream.
 
-The download queue and active job state are currently kept in memory; unfinished direct-file downloads do not yet survive an app restart. Automatic pause/resume from a persisted partial file is a later reliability milestone.
+The queue is saved locally in the application's data directory. Running or queued jobs are restored as Paused after a restart; choose Resume on each item to continue. Direct HTTP(S) downloads resume from partial files when the source accepts byte-range requests and returns the expected range offsets; ETag/Last-Modified validators are used where supplied. If a server disables byte ranges, the transfer safely starts again from zero. Desktop yt-dlp uses its own resumable .part files and `--continue`. The Android embedded media-extractor bridge and iOS HLS segment saver do not yet offer the same guaranteed cross-process resume behaviour; direct HTTP(S) downloads are resumable on those platforms.
 
 ## Project status
 

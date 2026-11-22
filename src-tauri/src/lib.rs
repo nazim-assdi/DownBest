@@ -1,6 +1,6 @@
 use futures_util::{future::try_join_all, StreamExt};
 use reqwest::{header, Client, Response, StatusCode};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -25,18 +25,106 @@ use tauri_plugin_media::{MediaDownloadRequest, MediaExt, MediaProgress};
 struct DownloadManager {
     records: Arc<Mutex<HashMap<String, DownloadRecord>>>,
     slots: Arc<Semaphore>,
+    persistence_file: Arc<Mutex<Option<PathBuf>>>,
 }
 impl Default for DownloadManager {
     fn default() -> Self {
-        Self { records: Arc::new(Mutex::new(HashMap::new())), slots: Arc::new(Semaphore::new(2)) }
+        Self {
+            records: Arc::new(Mutex::new(HashMap::new())),
+            slots: Arc::new(Semaphore::new(2)),
+            persistence_file: Arc::new(Mutex::new(None)),
+        }
     }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct PersistedDownload {
+    id: String, url: String, file_name: String, kind: String, status: String,
+    destination: String, file_path: Option<String>, downloaded_bytes: u64,
+    total_bytes: Option<u64>, error: Option<String>, concurrency: usize,
+    etag: Option<String>, last_modified: Option<String>,
 }
 
 struct DownloadRecord {
     id: String, url: String, file_name: String, kind: String, status: String,
     destination: String, file_path: Option<String>, downloaded: Arc<AtomicU64>, total: Option<u64>,
     started: Instant, error: Option<String>, cancel: CancellationToken,
-    progress_override: Option<f64>,
+    progress_override: Option<f64>, concurrency: usize,
+    etag: Option<String>, last_modified: Option<String>,
+}
+
+impl DownloadManager {
+    fn restore_queue(&self, path: PathBuf) {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        if let Ok(mut slot) = self.persistence_file.lock() { *slot = Some(path.clone()); }
+        let fallback = path.with_extension("json.tmp");
+        let bytes = std::fs::read(&path).or_else(|_| std::fs::read(&fallback));
+        let Ok(bytes) = bytes else { return; };
+        let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return; };
+        if let Ok(mut records) = self.records.lock() {
+            for item in items {
+                let status = match item.status.as_str() {
+                    "Completed" | "Failed" => item.status.clone(),
+                    _ => "Paused".to_string(),
+                };
+                records.insert(item.id.clone(), DownloadRecord {
+                    id: item.id, url: item.url, file_name: item.file_name, kind: item.kind,
+                    status, destination: item.destination, file_path: item.file_path,
+                    downloaded: Arc::new(AtomicU64::new(item.downloaded_bytes)),
+                    total: item.total_bytes, started: Instant::now(), error: item.error,
+                    cancel: CancellationToken::new(), progress_override: None,
+                    concurrency: item.concurrency.clamp(1, 8),
+                    etag: item.etag, last_modified: item.last_modified,
+                });
+            }
+        }
+        persist_records(self);
+    }
+}
+
+fn persist_records(manager: &DownloadManager) {
+    let path = manager.persistence_file.lock().ok().and_then(|slot| slot.clone());
+    let Some(path) = path else { return; };
+    let items = {
+        let Ok(records) = manager.records.lock() else { return; };
+        records.values().map(|record| PersistedDownload {
+            id: record.id.clone(), url: record.url.clone(), file_name: record.file_name.clone(),
+            kind: record.kind.clone(), status: record.status.clone(),
+            destination: record.destination.clone(), file_path: record.file_path.clone(),
+            downloaded_bytes: record.downloaded.load(Ordering::Relaxed),
+            total_bytes: record.total, error: record.error.clone(), concurrency: record.concurrency,
+            etag: record.etag.clone(), last_modified: record.last_modified.clone(),
+        }).collect::<Vec<_>>()
+    };
+    let Ok(bytes) = serde_json::to_vec(&items) else { return; };
+    if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, bytes).is_ok() {
+        if std::fs::rename(&temp, &path).is_err() {
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::rename(&temp, &path);
+        }
+    }
+}
+
+fn partial_bytes_for(record: &DownloadRecord) -> u64 {
+    let mut bytes = 0u64;
+    let mut found_partial = false;
+    if let Some(target) = record.file_path.as_ref() {
+        let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target, record.id));
+        if let Ok(meta) = std::fs::metadata(temp) {
+            bytes = meta.len();
+            found_partial = true;
+        }
+    }
+    let parts = PathBuf::from(&record.destination).join(format!(".downbest-{}", record.id));
+    if let Ok(entries) = std::fs::read_dir(parts) {
+        for entry in entries.flatten() {
+            bytes = bytes.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
+            found_partial = true;
+        }
+    }
+    if found_partial { bytes } else { record.downloaded.load(Ordering::Relaxed) }
 }
 
 #[derive(Serialize, Clone)]
@@ -58,7 +146,10 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
         id: record.id.clone(), url: record.url.clone(), file_name: record.file_name.clone(),
         kind: record.kind.clone(), status: record.status.clone(), destination: record.destination.clone(),
         file_path: record.file_path.clone(), downloaded_bytes: downloaded, total_bytes: record.total,
-        speed_bytes_sec: (downloaded as f64 / elapsed) as u64, progress, error: record.error.clone(),
+        speed_bytes_sec: if matches!(record.status.as_str(), "Downloading" | "Extracting media") {
+            (downloaded as f64 / elapsed) as u64
+        } else { 0 },
+        progress, error: record.error.clone(),
     }
 }
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
@@ -67,13 +158,12 @@ fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<S
             if record.status != status && matches!(status, "Downloading" | "Extracting media") {
                 record.started = Instant::now();
             }
-            if status == "Completed" {
-                record.progress_override = Some(100.0);
-            }
+            if status == "Completed" { record.progress_override = Some(100.0); }
             record.status = status.to_string();
             record.error = error;
         }
     }
+    persist_records(manager);
 }
 fn set_total(manager: &DownloadManager, id: &str, total: Option<u64>) {
     if let Ok(mut records) = manager.records.lock() {
@@ -94,6 +184,7 @@ fn set_file_path(manager: &DownloadManager, id: &str, path: &Path) {
             }
         }
     }
+    persist_records(manager);
 }
 
 fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
@@ -140,6 +231,34 @@ fn set_progress(manager: &DownloadManager, id: &str, progress: f64) {
 }
 
 
+fn spawn_download_task(
+    app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
+    destination: PathBuf, concurrency: usize, cancel: CancellationToken,
+) {
+    tauri::async_runtime::spawn(async move {
+        let saver_manager = manager.clone();
+        let saver_cancel = cancel.clone();
+        let saver = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+            loop {
+                tokio::select! {
+                    _ = saver_cancel.cancelled() => break,
+                    _ = interval.tick() => persist_records(&saver_manager),
+                }
+            }
+        });
+        let result = execute_download(app, manager.clone(), id.clone(), url, kind,
+            destination, concurrency, cancel.clone()).await;
+        cancel.cancel();
+        let _ = saver.await;
+        match result {
+            Ok(()) => set_status(&manager, &id, "Completed", None),
+            Err(error) if error == "Cancelled" => set_status(&manager, &id, "Paused", None),
+            Err(error) => set_status(&manager, &id, "Failed", Some(error)),
+        }
+    });
+}
+
 #[tauri::command]
 async fn start_download(
     app: AppHandle, manager: State<'_, DownloadManager>, url: String, kind: String,
@@ -163,31 +282,51 @@ async fn start_download(
         _ => default_destination,
     };
     let id = Uuid::new_v4().simple().to_string();
+    let requested = concurrency.unwrap_or(2).clamp(1, 8);
     let cancel = CancellationToken::new();
     let record = DownloadRecord {
         id: id.clone(), url: url.clone(),
         file_name: suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8])),
-        kind: kind.clone(), status: "Queued".into(), destination: destination_path.display().to_string(), file_path: None,
+        kind: kind.clone(), status: "Queued".into(),
+        destination: destination_path.display().to_string(), file_path: None,
         downloaded: Arc::new(AtomicU64::new(0)), total: None, started: Instant::now(),
         error: None, cancel: cancel.clone(), progress_override: None,
+        concurrency: requested, etag: None, last_modified: None,
     };
     let initial = view_of(&record);
     let manager = manager.inner().clone();
     manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?.insert(id.clone(), record);
-
-    let task_manager = manager.clone();
-    let task_id = id.clone();
-    let requested = concurrency.unwrap_or(2).clamp(1, 8);
-    tauri::async_runtime::spawn(async move {
-        let result = execute_download(app, task_manager.clone(), task_id.clone(), url, kind,
-            destination_path, requested, cancel).await;
-        match result {
-            Ok(()) => set_status(&task_manager, &task_id, "Completed", None),
-            Err(error) if error == "Cancelled" => set_status(&task_manager, &task_id, "Cancelled", None),
-            Err(error) => set_status(&task_manager, &task_id, "Failed", Some(error)),
-        }
-    });
+    persist_records(&manager);
+    spawn_download_task(app, manager, id, url, kind, destination_path, requested, cancel);
     Ok(initial)
+}
+
+#[tauri::command]
+fn resume_download(
+    app: AppHandle, manager: State<'_, DownloadManager>, id: String,
+) -> Result<DownloadView, String> {
+    let (url, kind, destination, concurrency, cancel, view) = {
+        let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+        let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
+        if record.status == "Completed" { return Err("This download is already complete.".into()); }
+        if !matches!(record.status.as_str(), "Paused" | "Failed" | "Cancelled") {
+            return Err("Pause the running download before resuming it.".into());
+        }
+        let recovered_bytes = partial_bytes_for(record);
+        record.downloaded.store(recovered_bytes, Ordering::Relaxed);
+        let cancel = CancellationToken::new();
+        record.cancel = cancel.clone();
+        record.status = "Queued".into();
+        record.error = None;
+        record.started = Instant::now();
+        record.progress_override = None;
+        let destination = PathBuf::from(&record.destination);
+        let view = view_of(record);
+        (record.url.clone(), record.kind.clone(), destination, record.concurrency, cancel, view)
+    };
+    persist_records(manager.inner());
+    spawn_download_task(app, manager.inner().clone(), id, url, kind, destination, concurrency, cancel);
+    Ok(view)
 }
 
 #[tauri::command]
@@ -198,16 +337,23 @@ fn get_downloads(manager: State<'_, DownloadManager>) -> Result<Vec<DownloadView
     Ok(result)
 }
 #[tauri::command]
-fn cancel_download(manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
-    let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
-    let record = records.get(&id).ok_or_else(|| "Download was not found.".to_string())?;
-    if !matches!(record.status.as_str(), "Completed" | "Failed" | "Cancelled") { record.cancel.cancel(); }
+fn pause_download(manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
+    {
+        let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+        let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
+        if matches!(record.status.as_str(), "Completed" | "Paused" | "Failed") { return Ok(()); }
+        record.status = "Pausing".into();
+        record.cancel.cancel();
+    }
+    persist_records(manager.inner());
     Ok(())
 }
 #[tauri::command]
 fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
     let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
     records.retain(|_, item| !matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled"));
+    drop(records);
+    persist_records(manager.inner());
     Ok(())
 }
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -348,22 +494,26 @@ fn unique_path(manager: &DownloadManager, id: &str, dir: &Path, name: &str) -> R
     let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
     let extension = original.extension().and_then(|s| s.to_str());
     let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+    if let Some(saved) = records.get(id).and_then(|record| record.file_path.clone()) {
+        let saved_path = PathBuf::from(saved);
+        if !saved_path.exists() { return Ok(saved_path); }
+    }
     for index in 0..10_000 {
         let candidate = if index == 0 { name.to_string() }
             else if let Some(ext) = extension { format!("{stem} ({index}).{ext}") }
             else { format!("{stem} ({index})") };
         let path = dir.join(candidate);
         let path_text = path.to_string_lossy().into_owned();
-        let reserved = records.values().any(|record| {
+        let reserved = records.iter().any(|(record_id, record)| record_id != id &&
             record.file_path.as_ref().map(|existing| {
-                if cfg!(windows) { existing.eq_ignore_ascii_case(&path_text) }
-                else { existing == &path_text }
-            }).unwrap_or(false)
-        });
+                if cfg!(windows) { existing.eq_ignore_ascii_case(&path_text) } else { existing == &path_text }
+            }).unwrap_or(false));
         if !path.exists() && !reserved {
             let record = records.get_mut(id).ok_or_else(|| "Download record was not found.".to_string())?;
             record.file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or(name).to_string();
             record.file_path = Some(path_text);
+            drop(records);
+            persist_records(manager);
             return Ok(path);
         }
     }
@@ -372,6 +522,8 @@ fn unique_path(manager: &DownloadManager, id: &str, dir: &Path, name: &str) -> R
     let record = records.get_mut(id).ok_or_else(|| "Download record was not found.".to_string())?;
     record.file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or(name).to_string();
     record.file_path = Some(path_text);
+    drop(records);
+    persist_records(manager);
     Ok(path)
 }
 fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
@@ -389,46 +541,115 @@ fn parse_content_range(value: Option<&header::HeaderValue>) -> Option<u64> {
     let (_, total) = raw.split_once('/')?;
     if total == "*" { None } else { total.parse().ok() }
 }
+fn parse_content_range_start(value: Option<&header::HeaderValue>) -> Option<u64> {
+    let raw = value?.to_str().ok()?;
+    raw.strip_prefix("bytes ")?.split('-').next()?.parse().ok()
+}
+fn set_validators(manager: &DownloadManager, id: &str, etag: Option<String>, last_modified: Option<String>) {
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            record.etag = etag;
+            record.last_modified = last_modified;
+        }
+    }
+    persist_records(manager);
+}
+fn saved_validators(manager: &DownloadManager, id: &str) -> (Option<String>, Option<String>) {
+    manager.records.lock().ok().and_then(|records| records.get(id).map(|r| (r.etag.clone(), r.last_modified.clone())))
+        .unwrap_or((None, None))
+}
+async fn response_from_offset(
+    client: &Client, url: &str, offset: u64, etag: Option<&str>, last_modified: Option<&str>,
+) -> Result<(Response, bool), String> {
+    let mut request = client.get(url).header(header::RANGE, format!("bytes={offset}-"));
+    if let Some(value) = etag.or(last_modified) {
+        if let Ok(header_value) = header::HeaderValue::from_str(value) {
+            request = request.header(header::IF_RANGE, header_value);
+        }
+    }
+    let response = request.send().await.map_err(|e| format!("Resume request failed: {e}"))?;
+    if response.status() == StatusCode::PARTIAL_CONTENT {
+        if parse_content_range_start(response.headers().get(header::CONTENT_RANGE)) == Some(offset) {
+            return Ok((response, true));
+        }
+        return Err("The server returned a mismatched Content-Range while resuming.".into());
+    }
+    if response.status().is_success() { return Ok((response, false)); }
+    Err(format!("Server returned HTTP {} while resuming.", response.status()))
+}
 
 async fn download_http(
     client: &Client, url: &str, target: &Path, destination: &Path, id: &str,
     concurrency: usize, manager: &DownloadManager, cancel: &CancellationToken,
 ) -> Result<(), String> {
+    let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
+    let parts_dir = destination.join(format!(".downbest-{id}"));
+    let previous_len = fs::metadata(&temp).await.map(|meta| meta.len()).unwrap_or(0);
+    let (previous_etag, previous_modified) = saved_validators(manager, id);
     let probe = client.get(url).header(header::RANGE, "bytes=0-0").send().await
         .map_err(|e| format!("Connection failed: {e}"))?;
+    let current_etag = probe.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let current_modified = probe.headers().get(header::LAST_MODIFIED).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let changed = previous_etag.as_ref().map(|old| current_etag.as_ref() != Some(old)).unwrap_or(false)
+        || previous_modified.as_ref().map(|old| current_modified.as_ref() != Some(old)).unwrap_or(false);
+    if changed {
+        let _ = fs::remove_file(&temp).await;
+        let _ = fs::remove_dir_all(&parts_dir).await;
+        reset_progress(manager, id);
+    }
+    set_validators(manager, id, current_etag.clone(), current_modified.clone());
+    let mut partial_len = if changed { 0 } else { previous_len };
+
     if probe.status() == StatusCode::PARTIAL_CONTENT {
         let total = parse_content_range(probe.headers().get(header::CONTENT_RANGE))
             .ok_or_else(|| "The server returned an invalid Content-Range header.".to_string())?;
         set_total(manager, id, Some(total));
-        let count = effective_segment_count(total, concurrency);
-        if count > 1 {
+        if partial_len == total && total > 0 {
+            drop(probe);
+            fs::rename(&temp, target).await.map_err(|e| format!("Could not finalize recovered download: {e}"))?;
+            return Ok(());
+        }
+        let has_segment_parts = fs::metadata(&parts_dir).await.map(|m| m.is_dir()).unwrap_or(false);
+        let count = if partial_len > 0 { 1 } else { effective_segment_count(total, concurrency) };
+        if count > 1 || has_segment_parts {
             drop(probe);
             let progress = progress_counter(manager, id)?;
             match download_segmented(client, url, target, destination, id, total, count, progress, cancel).await {
                 Ok(()) => Ok(()),
                 Err(error) if error == "Cancelled" => Err(error),
-                Err(_range_error) => {
-                    // Some origins advertise byte ranges but reject parallel requests.
-                    // Retry once with a normal single connection instead of failing the item.
+                Err(error) if error.contains("stopped supporting parallel ranges") => {
+                    let _ = fs::remove_dir_all(&parts_dir).await;
                     reset_progress(manager, id);
-                    let response = client.get(url).send().await
-                        .map_err(|e| format!("Parallel download failed and fallback connection failed: {e}"))?;
-                    if !response.status().is_success() {
-                        return Err(format!("Parallel download failed and fallback returned HTTP {}", response.status()));
-                    }
-                    stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel).await
+                    let response = client.get(url).send().await.map_err(|e| format!("Parallel download failed and fallback connection failed: {e}"))?;
+                    if !response.status().is_success() { return Err(format!("Parallel download fallback returned HTTP {}", response.status())); }
+                    stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel, false, 0).await
                 }
+                Err(error) => Err(error),
             }
         } else {
             drop(probe);
-            let response = client.get(url).send().await.map_err(|e| format!("Download request failed: {e}"))?;
-            if !response.status().is_success() { return Err(format!("Server returned HTTP {}", response.status())); }
-            stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel).await
+            let (response, append) = if partial_len > 0 {
+                let (response, append) = response_from_offset(client, url, partial_len, current_etag.as_deref(), current_modified.as_deref()).await?;
+                if !append { partial_len = 0; }
+                (response, append)
+            } else {
+                let response = client.get(url).send().await.map_err(|e| format!("Download request failed: {e}"))?;
+                if !response.status().is_success() { return Err(format!("Server returned HTTP {}", response.status())); }
+                (response, false)
+            };
+            stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel, append, partial_len).await
         }
     } else if probe.status().is_success() {
         let total = probe.content_length();
         set_total(manager, id, total);
-        stream_to_target(probe, target, id, manager, progress_counter(manager, id)?, cancel).await
+        let (response, append) = if partial_len > 0 {
+            let (response, append) = response_from_offset(client, url, partial_len, current_etag.as_deref(), current_modified.as_deref()).await?;
+            if !append { partial_len = 0; }
+            (response, append)
+        } else {
+            (probe, false)
+        };
+        stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel, append, partial_len).await
     } else {
         Err(format!("Server returned HTTP {} while checking range support.", probe.status()))
     }
@@ -436,23 +657,45 @@ async fn download_http(
 
 async fn stream_to_target(
     response: Response, target: &Path, id: &str, _manager: &DownloadManager,
-    progress: Arc<AtomicU64>, cancel: &CancellationToken,
+    progress: Arc<AtomicU64>, cancel: &CancellationToken, append: bool, initial_offset: u64,
 ) -> Result<(), String> {
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
-    let file = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true);
+    if append { options.append(true); } else { options.truncate(true); }
+    let file = options.open(&temp).await.map_err(|e| format!("Cannot open partial output file: {e}"))?;
     let mut file = BufWriter::with_capacity(256 * 1024, file);
+    progress.store(if append { initial_offset } else { 0 }, Ordering::Relaxed);
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = tokio::select! {
+    let mut since_sync = 0u64;
+    while let Some(item) = tokio::select! {
         _ = cancel.cancelled() => {
-            drop(file);
-            let _ = fs::remove_file(&temp).await;
+            let _ = file.flush().await;
+            let _ = file.get_ref().sync_data().await;
             return Err("Cancelled".into());
         },
         item = stream.next() => item,
     } {
-        let chunk = chunk.map_err(|e| format!("Network stream interrupted: {e}"))?;
-        file.write_all(&chunk).await.map_err(|e| format!("Disk write failed: {e}"))?;
+        let chunk = match item {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let _ = file.flush().await;
+                let _ = file.get_ref().sync_data().await;
+                return Err(format!("Network stream interrupted: {error}"));
+            }
+        };
+        if let Err(error) = file.write_all(&chunk).await {
+            let _ = file.flush().await;
+            let _ = file.get_ref().sync_data().await;
+            return Err(format!("Disk write failed: {error}"));
+        }
         add_progress(&progress, chunk.len() as u64);
+        since_sync += chunk.len() as u64;
+        if since_sync >= 4 * 1024 * 1024 {
+            file.flush().await.map_err(|e| format!("Could not flush partial file: {e}"))?;
+            file.get_ref().sync_data().await.map_err(|e| format!("Could not sync partial file: {e}"))?;
+            since_sync = 0;
+        }
     }
     file.flush().await.map_err(|e| format!("Could not flush file: {e}"))?;
     file.get_ref().sync_all().await.map_err(|e| format!("Could not sync file: {e}"))?;
@@ -469,14 +712,16 @@ async fn download_segmented(
     let parts_dir = destination.join(format!(".downbest-{id}"));
     fs::create_dir_all(&parts_dir).await.map_err(|e| format!("Cannot create temporary folder: {e}"))?;
     let chunk_size = (total + count as u64 - 1) / count as u64;
+    let mut existing_total = 0u64;
     let mut jobs = Vec::new();
     for index in 0..count {
         let start = index as u64 * chunk_size;
         if start >= total { break; }
         let end = (start + chunk_size - 1).min(total - 1);
+        let part_path = parts_dir.join(format!("part-{index:03}"));
+        existing_total = existing_total.saturating_add(fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0).min(end - start + 1));
         let client = client.clone();
         let url = url.to_string();
-        let part_path = parts_dir.join(format!("part-{index:03}"));
         let id = id.to_string();
         let cancel = cancel.clone();
         let progress = progress.clone();
@@ -485,12 +730,9 @@ async fn download_segmented(
             Ok::<PathBuf, String>(part_path)
         });
     }
-    let result = try_join_all(jobs).await;
-    let parts = match result {
-        Ok(parts) => parts,
-        Err(error) => { let _ = fs::remove_dir_all(&parts_dir).await; return Err(error); }
-    };
-    if cancel.is_cancelled() { let _ = fs::remove_dir_all(&parts_dir).await; return Err("Cancelled".into()); }
+    progress.store(existing_total, Ordering::Relaxed);
+    let parts = try_join_all(jobs).await?;
+    if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
     let output = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
     let mut output = BufWriter::with_capacity(256 * 1024, output);
@@ -507,32 +749,69 @@ async fn download_segmented(
 }
 
 async fn download_piece(
-    client: Client, url: String, start: u64, end: u64, path: PathBuf, id: &str,
+    client: Client, url: String, start: u64, end: u64, path: PathBuf, _id: &str,
     progress: Arc<AtomicU64>, cancel: CancellationToken,
 ) -> Result<(), String> {
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
-    let response = client.get(&url).header(header::RANGE, format!("bytes={start}-{end}"))
+    let expected = end - start + 1;
+    let mut existing = fs::metadata(&path).await.map(|meta| meta.len()).unwrap_or(0);
+    if existing > expected {
+        fs::remove_file(&path).await.map_err(|e| format!("Cannot reset oversized segment: {e}"))?;
+        existing = 0;
+    }
+    if existing == expected { return Ok(()); }
+    let offset = start + existing;
+    let response = client.get(&url).header(header::RANGE, format!("bytes={offset}-{end}"))
         .send().await.map_err(|e| format!("Segment connection failed: {e}"))?;
     if response.status() != StatusCode::PARTIAL_CONTENT {
-        return Err(format!("Server stopped supporting parallel ranges (HTTP {}). Try a lower speed profile.", response.status()));
+        return Err(format!("Server stopped supporting parallel ranges (HTTP {}).", response.status()));
     }
-    let file = OpenOptions::new().create(true).truncate(true).write(true).open(&path)
-        .await.map_err(|e| format!("Cannot create segment file: {e}"))?;
+    if parse_content_range_start(response.headers().get(header::CONTENT_RANGE)) != Some(offset) {
+        return Err("Server returned an unexpected range for a saved segment.".into());
+    }
+    let file = OpenOptions::new().create(true).append(true).open(&path)
+        .await.map_err(|e| format!("Cannot open segment file: {e}"))?;
     let mut file = BufWriter::with_capacity(256 * 1024, file);
     let mut stream = response.bytes_stream();
-    let mut received = 0u64;
-    while let Some(chunk) = tokio::select! {
-        _ = cancel.cancelled() => return Err("Cancelled".into()),
+    let mut received = existing;
+    let mut since_sync = 0u64;
+    while let Some(item) = tokio::select! {
+        _ = cancel.cancelled() => {
+            let _ = file.flush().await;
+            let _ = file.get_ref().sync_data().await;
+            return Err("Cancelled".into());
+        },
         item = stream.next() => item,
     } {
-        let chunk = chunk.map_err(|e| format!("Segment interrupted: {e}"))?;
-        received += chunk.len() as u64;
-        file.write_all(&chunk).await.map_err(|e| format!("Segment disk write failed: {e}"))?;
+        let chunk = match item {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                let _ = file.flush().await;
+                let _ = file.get_ref().sync_data().await;
+                return Err(format!("Segment interrupted: {error}"));
+            }
+        };
+        received = received.saturating_add(chunk.len() as u64);
+        if received > expected {
+            let _ = file.flush().await;
+            let _ = file.get_ref().sync_data().await;
+            return Err("Server sent more bytes than requested for a segment.".into());
+        }
+        if let Err(error) = file.write_all(&chunk).await {
+            let _ = file.flush().await;
+            let _ = file.get_ref().sync_data().await;
+            return Err(format!("Segment disk write failed: {error}"));
+        }
         add_progress(&progress, chunk.len() as u64);
+        since_sync += chunk.len() as u64;
+        if since_sync >= 4 * 1024 * 1024 {
+            file.flush().await.map_err(|e| format!("Cannot flush segment: {e}"))?;
+            file.get_ref().sync_data().await.map_err(|e| format!("Cannot sync segment: {e}"))?;
+            since_sync = 0;
+        }
     }
     file.flush().await.map_err(|e| format!("Cannot flush segment: {e}"))?;
     file.get_ref().sync_all().await.map_err(|e| format!("Cannot sync segment: {e}"))?;
-    let expected = end - start + 1;
     if received != expected { return Err(format!("Segment size mismatch: expected {expected} bytes, received {received}.")); }
     Ok(())
 }
@@ -909,6 +1188,9 @@ mod lite_mode_tests {
             error: None,
             cancel: CancellationToken::new(),
             progress_override: None,
+            concurrency: 2,
+            etag: None,
+            last_modified: None,
         }
     }
 
@@ -928,6 +1210,12 @@ mod lite_mode_tests {
         assert_eq!(first.file_name().and_then(|value| value.to_str()), Some("same.zip"));
         assert_eq!(second.file_name().and_then(|value| value.to_str()), Some("same (1).zip"));
         std::fs::remove_dir_all(folder).expect("remove test directory");
+    }
+
+    #[test]
+    fn byte_range_resume_reads_the_exact_start_offset() {
+        let value = header::HeaderValue::from_static("bytes 4096-8191/16384");
+        assert_eq!(parse_content_range_start(Some(&value)), Some(4096));
     }
 
     #[test]
@@ -996,12 +1284,18 @@ async fn reveal_download(manager: State<'_, DownloadManager>, id: String) -> Res
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(DownloadManager::default());
+        .manage(DownloadManager::default())
+        .setup(|app| {
+            if let Ok(directory) = app.path().app_data_dir() {
+                app.state::<DownloadManager>().restore_queue(directory.join("queue.json"));
+            }
+            Ok(())
+        });
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_media::init());
     builder
         .invoke_handler(tauri::generate_handler![
-            start_download, get_downloads, cancel_download, clear_finished, check_engines, supports_folder_picker, reveal_download
+            start_download, resume_download, get_downloads, pause_download, clear_finished, check_engines, supports_folder_picker, reveal_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running DownBest");

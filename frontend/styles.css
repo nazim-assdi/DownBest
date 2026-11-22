@@ -463,3 +463,38 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 @media(max-width:900px){.theme-options{grid-template-columns:1fr}.theme-option{padding:8px 10px}.theme-preview{width:48px;height:35px}.appearance-panel{top:80px}.comfort-controls{grid-template-columns:1fr}}
 @media(max-width:760px){.header-subtitle{display:none}.appearance-button{width:34px;padding:0;justify-content:center}.appearance-button span{display:none}.appearance-panel{top:70px;right:15px;width:calc(100vw - 30px);padding:16px}.theme-options{grid-template-columns:1fr 1fr}.theme-option:last-child{grid-column:1/-1}.comfort-controls{grid-template-columns:1fr}}
 @media(max-width:440px){.theme-options{grid-template-columns:1fr}.theme-option:last-child{grid-column:auto}.appearance-button,.right-head button{height:33px}.appearance-heading h2{font-size:15px}}
+
+
+/* Persistent transfer controls */
+.pause-button,
+.resume-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 76px;
+  padding: 8px 12px;
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: .82;
+}
+.pause-button:hover,
+.resume-button:hover { opacity: 1; }
+.resume-button {
+  border-color: #6f8f79;
+  background: #6f8f79;
+  color: #fff;
+}
+.resume-button svg { width: 14px; height: 14px; }
+.status.paused { opacity: .8; }
+.download.paused .track { opacity: .58; }
+@media (max-width: 520px) {
+  .pause-button, .resume-button { min-width: 66px; padding: 7px 9px; }
+}

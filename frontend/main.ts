@@ -51,7 +51,7 @@ const safe = (s: string): string => s.replace(/[&<>"']/g, c => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 }[c]!));
 const finalStatus = (status: string): boolean =>
-  ["Completed", "Failed", "Cancelled"].includes(status);
+  ["Completed", "Failed", "Cancelled", "Paused"].includes(status);
 const formatTime = (seconds: number): string => {
   if (!Number.isFinite(seconds) || seconds < 0) return "—";
   if (seconds < 60) return Math.ceil(seconds) + " sec";
@@ -85,7 +85,7 @@ root.innerHTML = [
   '<div class="fields"><div><label for="kind">CONTENT TYPE</label><select id="kind"><option value="auto">Auto detect</option><option value="file">Direct file</option><option value="audio">Audio only</option><option value="video">Video + audio</option><option value="video-only">Video only</option></select></div>',
   '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2" selected>Lite · Low CPU</option><option value="4">Balanced · 4 connections</option><option value="8">High throughput · 8 connections</option></select></div>',
   '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default Downloads folder"><button id="choose-folder" type="button">Browse</button></div></div></div>',
-  '<div class="composer-bottom"><p class="note">Lite mode runs up to 2 downloads at the same time. Remaining links wait in the queue automatically.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
+  '<div class="composer-bottom"><p class="note">Pause safely at any time. DownBest saves your queue and resumes partial downloads after restart.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
   '<section class="engine-strip"><div class="engine-title"><span class="eyebrow">DOWNLOAD ENGINES</span><b>Ready for your links</b></div><div id="engine-list"><span class="engine-loading">Checking installed tools…</span></div></section>',
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
@@ -110,7 +110,7 @@ function renderDownloads() {
   const running = active.filter(d => d.status !== "Queued");
   const queued = active.length - running.length;
   const completed = downloads.filter(d => d.status === "Completed");
-  const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled");
+  const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled" || d.status === "Paused");
   document.querySelector("#active-count")!.textContent = String(active.length);
   document.querySelector("#sidebar-active")!.textContent = running.length + " running";
   document.querySelector("#sidebar-queued")!.textContent = queued + " waiting · max 2 parallel jobs";
@@ -126,7 +126,7 @@ function renderDownloads() {
   const visible = downloads.filter(d => {
     if (filter === "active" && finalStatus(d.status)) return false;
     if (filter === "completed" && d.status !== "Completed") return false;
-    if (filter === "failed" && d.status !== "Failed" && d.status !== "Cancelled") return false;
+    if (filter === "failed" && d.status !== "Failed" && d.status !== "Cancelled" && d.status !== "Paused") return false;
     const searchable = (d.file_name + " " + d.url + " " + d.destination + " " + d.status).toLowerCase();
     return !query || searchable.includes(query);
   });
@@ -145,8 +145,9 @@ function renderDownloads() {
     const done = d.status === "Completed";
     const failedItem = d.status === "Failed";
     const cancelled = d.status === "Cancelled";
+    const paused = d.status === "Paused";
     const queued = d.status === "Queued";
-    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" : queued ? "queued" : "running";
+    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" : paused ? "paused" : queued ? "queued" : "running";
     const sizeDetail = d.total_bytes
       ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
       : bytes(d.downloaded_bytes) + " downloaded";
@@ -154,8 +155,9 @@ function renderDownloads() {
       ? " · " + formatTime((d.total_bytes - d.downloaded_bytes) / d.speed_bytes_sec) + " left"
       : "";
     const speed = d.speed_bytes_sec > 0 ? bytes(d.speed_bytes_sec) + "/s" : (queued ? "Waiting for a free slot" : "Connecting…");
-    const detail = failedItem ? safe(d.error || "Download failed") :
-      cancelled ? "Download cancelled" :
+    const detail = failedItem ? safe(d.error || "Download failed · you can resume this item") :
+      paused ? "Paused · " + sizeDetail + " saved. Resume whenever you are ready." :
+      cancelled ? "Download paused" :
       done ? "Saved successfully" :
       queued ? "Waiting in queue · starts automatically" :
       sizeDetail + " · " + speed + eta;
@@ -167,10 +169,12 @@ function renderDownloads() {
         : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
       : "";
     const action = !finalStatus(d.status)
-      ? '<button class="icon-action cancel" data-cancel="' + safe(d.id) + '" title="Cancel download">' + icons.close + '</button>'
+      ? '<button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button>'
       : done && d.file_path && desktopFileActions
         ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
-        : '<span class="finish-mark ' + statusClass + '">' + (failedItem || cancelled ? icons.close : icons.check) + '</span>';
+        : paused || failedItem || cancelled
+          ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
+          : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
     return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(d.status) + '</span></div><p>' + detail + '</p><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><div class="download-meta"><span>' + (done ? "100% complete" : pct.toFixed(1) + "%") + ' <em>·</em> ' + safe(d.kind.toUpperCase()) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
   }).join("");
 }
@@ -334,12 +338,22 @@ document.querySelector("#choose-folder")!.addEventListener("click", async () => 
 
 document.querySelector("#download-list")!.addEventListener("click", async event => {
   const target = event.target as HTMLElement;
-  const cancel = target.closest<HTMLButtonElement>("[data-cancel]");
-  if (cancel) {
+  const pause = target.closest<HTMLButtonElement>("[data-pause]");
+  if (pause) {
     try {
-      await invoke("cancel_download", { id: cancel.dataset.cancel });
-      toast("Cancellation requested.");
+      await invoke("pause_download", { id: pause.dataset.pause });
+      toast("Pausing safely · partial data will be kept.");
       await refreshDownloads();
+    } catch (error) { toast(String(error), true); }
+    return;
+  }
+  const resume = target.closest<HTMLButtonElement>("[data-resume]");
+  if (resume) {
+    try {
+      await invoke("resume_download", { id: resume.dataset.resume });
+      toast("Resuming from saved progress.");
+      await refreshDownloads();
+      scheduleRefresh(100);
     } catch (error) { toast(String(error), true); }
     return;
   }
