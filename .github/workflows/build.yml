@@ -308,6 +308,20 @@ jobs:
         run: |
           npm run build
           npm run tauri icon app-icon.svg
+      - name: Link Tauri iOS API for swift-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path src-tauri/Cargo.toml
+          tauri_ios_api="$(find "$HOME/.cargo/registry/src" -type d -path '*/tauri-*/mobile/ios-api' -print | sort | tail -n 1)"
+          if [[ -z "$tauri_ios_api" ]]; then
+            echo "Could not locate the Tauri iOS Swift API package in the Cargo registry." >&2
+            exit 1
+          fi
+          dependency_path="$GITHUB_WORKSPACE/../../crates/tauri/mobile/ios-api"
+          mkdir -p "$(dirname "$dependency_path")"
+          ln -sfn "$tauri_ios_api" "$dependency_path"
+          echo "Linked swift-rs Tauri API package to $tauri_ios_api"
       - name: Compile unsigned iOS device and simulator targets
         shell: bash
         run: |
