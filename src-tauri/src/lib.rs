@@ -144,7 +144,7 @@ fn write_job_cookies(app: &AppHandle, id: &str, contents: Option<String>) -> Res
         return Err("The cookies.txt file is too large (maximum 4 MiB).".into());
     }
     let has_cookie_rows = contents.lines().any(|line| {
-        !line.trim().is_empty() && !line.starts_with('#') && line.split('\\t').count() >= 7
+        !line.trim().is_empty() && !line.starts_with('#') && line.split('\t').count() >= 7
     });
     if !has_cookie_rows {
         return Err("Invalid cookies.txt file. Export cookies in Netscape format and try again.".into());
@@ -254,6 +254,7 @@ fn set_file_path(manager: &DownloadManager, id: &str, path: &Path) {
     persist_records(manager);
 }
 
+#[cfg(target_os = "android")]
 fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &MediaProgress) {
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
