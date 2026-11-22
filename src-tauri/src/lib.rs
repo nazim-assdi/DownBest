@@ -112,9 +112,22 @@ fn persist_records(manager: &DownloadManager) {
     if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
     let temp = path.with_extension("json.tmp");
     if std::fs::write(&temp, bytes).is_ok() {
+        // Flush the queue snapshot before the atomic rename so a sudden shutdown
+        // is less likely to leave only an empty or partially written queue file.
+        let synced = std::fs::OpenOptions::new().write(true).open(&temp)
+            .and_then(|file| file.sync_all());
+        if synced.is_err() {
+            return;
+        }
         if std::fs::rename(&temp, &path).is_err() {
             let _ = std::fs::remove_file(&path);
             let _ = std::fs::rename(&temp, &path);
+        }
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
         }
     }
 }
