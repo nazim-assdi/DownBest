@@ -35,7 +35,9 @@ const icons: Record<string, string> = {
   refresh: '<svg viewBox="0 0 24 24"><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2"/></svg>',
   external: '<svg viewBox="0 0 24 24"><path d="M14 3h7v7"/><path d="M10 14 21 3"/><path d="M19 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h6"/></svg>',
   search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>',
-  layers: '<svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 16 9 5 9-5"/></svg>'
+  layers: '<svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5"/><path d="m3 16 9 5 9-5"/></svg>',
+  settings: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.4 1.1-1.4 2.4-1.7-.7a8 8 0 0 1-1.6.9l-.3 1.8h-2.8l-.3-1.8a8 8 0 0 1-1.6-.9l-1.7.7-1.4-2.4 1.4-1.1a7 7 0 0 1 0-1.9l-1.4-1.1 1.4-2.4 1.7.7a8 8 0 0 1 1.6-.9l.3-1.8h2.8l.3 1.8a8 8 0 0 1 1.6.9l1.7-.7 1.4 2.4-1.4 1.1a7 7 0 0 1 0 1.9Z"/></svg>',
+  eye: '<svg viewBox="0 0 24 24"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>'
 };
 
 const bytes = (n: number): string => {
@@ -55,11 +57,13 @@ const formatTime = (seconds: number): string => {
   if (seconds < 3600) return Math.floor(seconds / 60) + " min " + Math.ceil(seconds % 60) + " sec";
   return Math.floor(seconds / 3600) + " hr " + Math.floor((seconds % 3600) / 60) + " min";
 };
+let toastTimer: number | undefined;
 function toast(message: string, error = false) {
   const el = document.querySelector<HTMLDivElement>("#toast")!;
+  if (toastTimer !== undefined) window.clearTimeout(toastTimer);
   el.textContent = message;
   el.className = error ? "toast visible error" : "toast visible";
-  window.setTimeout(() => { el.className = "toast"; }, 3800);
+  toastTimer = window.setTimeout(() => { el.className = "toast"; toastTimer = undefined; }, 3800);
 }
 
 root.innerHTML = [
@@ -73,8 +77,8 @@ root.innerHTML = [
   '<div class="sidebar-foot"><span>PRIVATE BY DESIGN</span><small>DOWNBEST LITE 1.2.0</small></div>',
   '</aside>',
   '<main class="main">',
-  '<header><div><span class="eyebrow">YOUR DOWNLOAD WORKSPACE</span><h1>Download center</h1></div><div class="right-head"><i id="engine-dot"></i><span id="engine-state">Engine ready</span><button id="refresh" title="Refresh">' + icons.refresh + '</button></div></header>',
-  '<section class="hero"><div class="hero-copy"><span class="chip"><i></i> LITE ENGINE · LOW CPU</span><h2>Everything downloading,<br><em>all in one place.</em></h2><p>Queue multiple links, watch every transfer live, and find completed files without searching through folders.</p><div class="stats"><div><b id="stat-active">0</b><small>Active now</small></div><div><b id="stat-completed">0</b><small>Completed</small></div><div><b>2</b><small>Parallel jobs</small></div></div></div><div class="hero-visual"><div class="visual-grid"></div><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="hero-core">' + icons.download + '<b>DB</b><small>LIVE ENGINE</small></div><span class="float-tag tag-a">HTTP / HTTPS</span><span class="float-tag tag-b">YT-DLP</span><span class="float-tag tag-c">QUEUE ACTIVE</span></div></section>',
+  '<header><div><span class="eyebrow">YOUR DOWNLOAD WORKSPACE</span><h1>Download center</h1><p class="header-subtitle">A calmer place to manage every transfer.</p></div><div class="right-head"><i id="engine-dot"></i><span id="engine-state">Engine ready</span><button id="appearance" class="appearance-button" type="button" title="Appearance settings" aria-expanded="false">' + icons.settings + '<span>Appearance</span></button><button id="refresh" class="refresh-button" title="Refresh downloads">' + icons.refresh + '</button></div></header>',
+  '<section id="appearance-panel" class="appearance-panel" hidden aria-label="Appearance settings"><div class="appearance-heading"><div><span class="eyebrow">PERSONAL COMFORT</span><h2>Appearance</h2><p>Choose a softer view for long sessions.</p></div><button id="close-appearance" class="close-appearance" type="button" aria-label="Close appearance settings">×</button></div><div class="theme-options"><button class="theme-option" type="button" data-theme-choice="eye" aria-pressed="true"><span class="theme-preview preview-eye"><i></i><b></b><em></em></span><span><b>Eye comfort</b><small>Warm sage · low glare</small></span><span class="theme-check">✓</span></button><button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false"><span class="theme-preview preview-dark"><i></i><b></b><em></em></span><span><b>Midnight</b><small>Deep dark · crisp</small></span><span class="theme-check">✓</span></button><button class="theme-option" type="button" data-theme-choice="light" aria-pressed="false"><span class="theme-preview preview-light"><i></i><b></b><em></em></span><span><b>Soft light</b><small>Warm paper · gentle contrast</small></span><span class="theme-check">✓</span></button></div><div class="comfort-controls"><label class="toggle-row"><span><b>Reduce motion</b><small>Limit animated interface elements</small></span><input id="reduce-motion" type="checkbox"><i></i></label><label class="toggle-row"><span><b>Larger text</b><small>Make labels and details easier to read</small></span><input id="large-text" type="checkbox"><i></i></label></div><p class="appearance-note">' + icons.eye + '<span>Eye Comfort is the default theme. Your settings stay on this device.</span></p></section>',  '<section class="hero"><div class="hero-copy"><span class="chip"><i></i> LITE ENGINE · LOW CPU</span><h2>Everything downloading,<br><em>all in one place.</em></h2><p>Queue multiple links, watch every transfer live, and find completed files without searching through folders.</p><div class="stats"><div><b id="stat-active">0</b><small>Active now</small></div><div><b id="stat-completed">0</b><small>Completed</small></div><div><b>2</b><small>Parallel jobs</small></div></div></div><div class="hero-visual"><div class="visual-grid"></div><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="hero-core">' + icons.download + '<b>DB</b><small>LIVE ENGINE</small></div><span class="float-tag tag-a">HTTP / HTTPS</span><span class="float-tag tag-b">YT-DLP</span><span class="float-tag tag-c">QUEUE ACTIVE</span></div></section>',
   '<section class="panel composer"><div class="section-top"><div><span class="eyebrow">BATCH DOWNLOAD</span><h2>Add one link or a whole list</h2><p>Paste multiple links, one per line. DownBest will add every link to the queue.</p></div><span class="step">01</span></div>',
   '<form id="download-form"><div class="url-label-row"><label for="urls">DOWNLOAD LINKS</label><span id="url-count">0 links detected</span></div><div class="urlbox"><span>' + icons.link + '</span><textarea id="urls" rows="3" placeholder="https://example.com/file-one.zip&#10;https://example.com/file-two.mp4" required></textarea></div>',
   '<div class="fields"><div><label for="kind">CONTENT TYPE</label><select id="kind"><option value="auto">Auto detect</option><option value="file">Direct file</option><option value="audio">Audio only</option><option value="video">Video + audio</option><option value="video-only">Video only</option></select></div>',
@@ -189,6 +193,75 @@ function scheduleRefresh(delay?: number) {
     scheduleRefresh(document.hidden ? 2500 : active ? 650 : 2200);
   }, delay === undefined ? 300 : delay);
 }
+type Theme = "eye" | "dark" | "light";
+type Preferences = { theme: Theme; reduceMotion: boolean; largeText: boolean };
+const PREFERENCE_KEY = "downbest-lite-appearance-v1";
+function loadPreferences(): Preferences {
+  const fallback: Preferences = {
+    theme: "eye",
+    reduceMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
+    largeText: false
+  };
+  try {
+    const saved = localStorage.getItem(PREFERENCE_KEY);
+    if (!saved) return fallback;
+    const parsed = JSON.parse(saved) as Partial<Preferences>;
+    return {
+      theme: parsed.theme === "dark" || parsed.theme === "light" || parsed.theme === "eye" ? parsed.theme : fallback.theme,
+      reduceMotion: typeof parsed.reduceMotion === "boolean" ? parsed.reduceMotion : fallback.reduceMotion,
+      largeText: typeof parsed.largeText === "boolean" ? parsed.largeText : false
+    };
+  } catch { return fallback; }
+}
+let preferences = loadPreferences();
+function applyPreferences() {
+  document.documentElement.dataset.theme = preferences.theme;
+  document.documentElement.dataset.reduceMotion = String(preferences.reduceMotion);
+  document.documentElement.dataset.largeText = String(preferences.largeText);
+  document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.themeChoice === preferences.theme));
+  });
+  const motion = document.querySelector<HTMLInputElement>("#reduce-motion");
+  const textSize = document.querySelector<HTMLInputElement>("#large-text");
+  if (motion) motion.checked = preferences.reduceMotion;
+  if (textSize) textSize.checked = preferences.largeText;
+  try { localStorage.setItem(PREFERENCE_KEY, JSON.stringify(preferences)); } catch { /* storage can be disabled */ }
+}
+function setPreference<K extends keyof Preferences>(key: K, value: Preferences[K]) {
+  preferences = { ...preferences, [key]: value };
+  applyPreferences();
+}
+const appearancePanel = document.querySelector<HTMLElement>("#appearance-panel")!;
+const appearanceButton = document.querySelector<HTMLButtonElement>("#appearance")!;
+function setAppearanceOpen(open: boolean) {
+  appearancePanel.hidden = !open;
+  appearanceButton.setAttribute("aria-expanded", String(open));
+  if (open) document.querySelector<HTMLButtonElement>("[data-theme-choice]")?.focus();
+}
+appearanceButton.addEventListener("click", () => setAppearanceOpen(appearancePanel.hidden));
+document.querySelector("#close-appearance")!.addEventListener("click", () => setAppearanceOpen(false));
+document.querySelectorAll<HTMLButtonElement>("[data-theme-choice]").forEach(button => {
+  button.addEventListener("click", () => setPreference("theme", button.dataset.themeChoice as Theme));
+});
+document.querySelector<HTMLInputElement>("#reduce-motion")!.addEventListener("change", event => {
+  setPreference("reduceMotion", (event.currentTarget as HTMLInputElement).checked);
+});
+document.querySelector<HTMLInputElement>("#large-text")!.addEventListener("change", event => {
+  setPreference("largeText", (event.currentTarget as HTMLInputElement).checked);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !appearancePanel.hidden) {
+    setAppearanceOpen(false);
+    appearanceButton.focus();
+  }
+});
+document.addEventListener("click", event => {
+  if (appearancePanel.hidden) return;
+  const target = event.target as Node;
+  if (!appearancePanel.contains(target) && !appearanceButton.contains(target)) setAppearanceOpen(false);
+});
+applyPreferences();
+
 function updateUrlCount() {
   const content = document.querySelector<HTMLTextAreaElement>("#urls")!.value;
   const count = content.split(/\r?\n/).map(line => line.trim()).filter(Boolean).length;
