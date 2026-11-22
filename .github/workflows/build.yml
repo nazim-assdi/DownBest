@@ -194,6 +194,31 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  ios-rust-check:
+    name: iOS Rust compile check (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - name: Install frontend dependencies
+        run: npm install
+      - name: Prepare Tauri frontend assets
+        run: |
+          npm run build
+          npm run tauri icon app-icon.svg
+      - name: Compile unsigned iOS device and simulator targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)" cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios --lib
+          SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)" cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios-sim --lib
+
   ios:
     name: iOS IPA (requires Apple signing setup)
     if: ${{ vars.ENABLE_SIGNED_IOS_BUILD == 'true' }}
