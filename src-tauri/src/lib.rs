@@ -1308,9 +1308,9 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::{effective_segment_count, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
-    use reqwest::header;
-    use std::{path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
+    use super::{download_http, effective_segment_count, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
+    use reqwest::{header, Client};
+    use std::{io::{Read, Write}, net::TcpListener, path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
@@ -1351,6 +1351,108 @@ mod lite_mode_tests {
         assert_eq!(first.file_name().and_then(|value| value.to_str()), Some("same.zip"));
         assert_eq!(second.file_name().and_then(|value| value.to_str()), Some("same (1).zip"));
         std::fs::remove_dir_all(folder).expect("remove test directory");
+    }
+
+    #[test]
+    fn interrupted_http_download_resumes_from_saved_byte_offset_after_restart() {
+        let root = std::env::temp_dir().join(format!("downbest-http-resume-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create test directory");
+        let queue_path = root.join("queue.json");
+        let target = root.join("resume.bin");
+        let partial = PathBuf::from(format!("{}.downbest-resume-job.tmp", target.display()));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
+        let address = listener.local_addr().expect("read server address");
+
+        let server = std::thread::spawn(move || {
+            const BODY: &[u8] = b"0123456789abcdef";
+            for step in 0..4 {
+                let (mut socket, _) = listener.accept().expect("accept HTTP request");
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let read = socket.read(&mut buffer).expect("read HTTP headers");
+                    if read == 0 { break; }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let request_text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                match step {
+                    0 | 2 => {
+                        assert!(request_text.contains("range: bytes=0-0"));
+                        let headers = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/{}\r\nAccept-Ranges: bytes\r\nETag: \"stable\"\r\nConnection: close\r\n\r\n",
+                            BODY.len()
+                        );
+                        socket.write_all(headers.as_bytes()).expect("write range-probe headers");
+                        socket.write_all(b"x").expect("write range-probe byte");
+                    }
+                    1 => {
+                        assert!(!request_text.contains("range: bytes="));
+                        let headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"stable\"\r\nConnection: close\r\n\r\n",
+                            BODY.len()
+                        );
+                        socket.write_all(headers.as_bytes()).expect("write interrupted response headers");
+                        socket.write_all(&BODY[..8]).expect("write partial body");
+                    }
+                    3 => {
+                        assert!(request_text.contains("range: bytes=8-"), "resume request did not start at byte 8: {request_text}");
+                        let headers = format!(
+                            "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes 8-{}/{}\r\nAccept-Ranges: bytes\r\nETag: \"stable\"\r\nConnection: close\r\n\r\n",
+                            BODY.len() - 8, BODY.len() - 1, BODY.len()
+                        );
+                        socket.write_all(headers.as_bytes()).expect("write resumed response headers");
+                        socket.write_all(&BODY[8..]).expect("write remaining body");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        let manager = DownloadManager::default();
+        manager.restore_queue(queue_path.clone());
+        let mut record = queued_record("resume-job");
+        record.status = "Downloading".into();
+        record.destination = root.display().to_string();
+        record.file_path = Some(target.display().to_string());
+        manager.records.lock().expect("lock queue").insert(record.id.clone(), record);
+        persist_records(&manager);
+
+        let client = Client::builder()
+            .default_headers({
+                let mut headers = header::HeaderMap::new();
+                headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("identity"));
+                headers
+            })
+            .build().expect("create HTTP client");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().build().expect("create async runtime");
+
+        let first_attempt = runtime.block_on(download_http(
+            &client, &format!("http://{address}/asset.bin"), &target, &root,
+            "resume-job", 1, &manager, &CancellationToken::new()
+        ));
+        assert!(first_attempt.is_err(), "first connection should be intentionally interrupted");
+        assert_eq!(std::fs::metadata(&partial).expect("partial file exists").len(), 8);
+        persist_records(&manager);
+
+        let restarted = DownloadManager::default();
+        restarted.restore_queue(queue_path);
+        {
+            let records = restarted.records.lock().expect("lock restored queue");
+            let restored = records.get("resume-job").expect("restored download");
+            assert_eq!(restored.status, "Paused");
+            assert_eq!(partial_bytes_for(restored), 8);
+        }
+
+        let resumed = runtime.block_on(download_http(
+            &client, &format!("http://{address}/asset.bin"), &target, &root,
+            "resume-job", 1, &restarted, &CancellationToken::new()
+        ));
+        assert!(resumed.is_ok(), "second attempt should resume successfully: {resumed:?}");
+        server.join().expect("local HTTP server completed");
+        assert_eq!(std::fs::read(&target).expect("read completed file"), b"0123456789abcdef");
+        std::fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]
