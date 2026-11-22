@@ -609,33 +609,68 @@ async fn run_media_download(
     }
     command.arg(url.as_str()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("Could not start yt-dlp: {e}"))?;
-    let stdout = child.stdout.take().ok_or_else(|| "Could not read yt-dlp output.".to_string())?;
-    let stderr = child.stderr.take();
-    let stderr_task = tokio::spawn(async move {
-        let mut text = String::new();
-        if let Some(mut stream) = stderr { let _ = stream.read_to_string(&mut text).await; }
-        text
-    });
-    let mut lines = BufReader::new(stdout).lines();
-    loop {
-        let line = tokio::select! {
-            _ = cancel.cancelled() => { let _ = child.kill().await; return Err("Cancelled".into()); }
-            result = lines.next_line() => result.map_err(|e| format!("Could not read yt-dlp progress: {e}"))?,
-        };
-        let Some(line) = line else { break };
-        if let Some(data) = line.strip_prefix("__DOWNBEST__") {
-            let fields: Vec<&str> = data.split('|').collect();
-            if let Some(downloaded) = fields.first().and_then(|v| v.parse::<u64>().ok()) {
-                if let Ok(records) = manager.records.lock() {
-                    if let Some(record) = records.get(id) { record.downloaded.store(downloaded, Ordering::Relaxed); }
+    let stdout = child.stdout.take().ok_or_else(|| "Could not read yt-dlp result output.".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "Could not read yt-dlp progress output.".to_string())?;
+
+    // yt-dlp writes progress to stderr by default; final paths are printed to stdout.
+    // Drain both pipes concurrently so neither stream can block the downloader.
+    let stdout_manager = manager.clone();
+    let stdout_id = id.to_string();
+    let stdout_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(index) = line.find("__DOWNBEST_FILE__") {
+                let value = line[index + "__DOWNBEST_FILE__".len()..].trim();
+                if !value.is_empty() {
+                    set_file_path(&stdout_manager, &stdout_id, Path::new(value));
                 }
             }
-            if let Some(total) = fields.get(1).and_then(|v| v.parse::<u64>().ok()) { set_total(manager, id, Some(total)); }
         }
-    }
-    let status = child.wait().await.map_err(|e| format!("yt-dlp process failed: {e}"))?;
+    });
+
+    let progress_manager = manager.clone();
+    let progress_id = id.to_string();
+    let stderr_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut captured = String::new();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(index) = line.find("__DOWNBEST__") {
+                let data = &line[index + "__DOWNBEST__".len()..];
+                update_media_progress(&progress_manager, &progress_id, data);
+            }
+            captured.push_str(&line);
+            captured.push('\n');
+            if captured.len() > 16_000 {
+                let excess = captured.len() - 12_000;
+                let cut = captured.char_indices().find(|(index, _)| *index >= excess)
+                    .map(|(index, _)| index).unwrap_or(captured.len());
+                captured.drain(..cut);
+            }
+        }
+        captured
+    });
+
+    let status = tokio::select! {
+        _ = cancel.cancelled() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err("Cancelled".into());
+        }
+        result = child.wait() => result.map_err(|e| format!("yt-dlp process failed: {e}"))?,
+    };
+    let _ = stdout_task.await;
     let stderr_text = stderr_task.await.unwrap_or_default();
-    if status.success() { Ok(()) } else {
+    if status.success() {
+        let output = manager.records.lock().ok()
+            .and_then(|records| records.get(id).and_then(|record| record.file_path.clone()));
+        match output {
+            Some(path) if Path::new(&path).is_file() => Ok(()),
+            Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {path}")),
+            None => Err("yt-dlp finished but did not report the resulting file path. Check the selected save folder.".into()),
+        }
+    } else {
         let tail: String = stderr_text.chars().rev().take(900).collect::<String>().chars().rev().collect();
         Err(if tail.trim().is_empty() { format!("yt-dlp exited with status {status}.") } else { format!("yt-dlp: {tail}") })
     }
