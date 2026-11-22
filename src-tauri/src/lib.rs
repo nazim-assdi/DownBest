@@ -412,13 +412,14 @@ async fn start_download(
         "auto" | "file" | "audio" | "video" | "video-only" => kind,
         _ => "auto".to_string(),
     };
-    let mobile_default = app.path().app_data_dir().ok()
-        .map(|path| path.join("Downloads").join("DownBest"));
-    let default_base = if cfg!(any(target_os = "android", target_os = "ios")) {
-        mobile_default
-    } else {
-        dirs::download_dir().or_else(|| dirs::document_dir()).map(|path| path.join("DownBest"))
-    };
+    let app_download_folder = app.path().download_dir().ok().map(|path| path.join("DownBest"));
+    let default_base = app_download_folder.or_else(|| {
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            app.path().app_data_dir().ok().map(|path| path.join("Downloads").join("DownBest"))
+        } else {
+            dirs::download_dir().or_else(|| dirs::document_dir()).map(|path| path.join("DownBest"))
+        }
+    });
     let default_destination = default_base.unwrap_or_else(|| std::env::temp_dir().join("DownBest"));
     let destination_path = match destination {
         Some(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
@@ -1492,9 +1493,9 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::{download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
+    use super::{cleanup_cancelled_files, download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
     use reqwest::{header, Client};
-    use std::{io::{Read, Write}, net::TcpListener, path::PathBuf, sync::{atomic::{AtomicU64, Ordering}, Arc}, time::Instant};
+    use std::{io::{Read, Write}, net::TcpListener, path::PathBuf, sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
@@ -1541,6 +1542,33 @@ mod lite_mode_tests {
             cookies_file: None,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn cancelling_a_job_removes_its_http_and_extractor_temporary_files() {
+        let root = std::env::temp_dir().join(format!("downbest-cancel-cleanup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create cancellation test folder");
+        let id = "0123456789abcdef0123456789abcdef";
+        let target = root.join("sample.mp4");
+        let http_partial = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
+        let parts_dir = root.join(format!(".downbest-{id}"));
+        let extractor_partial = root.join(format!("sample - {}.mp4.part", &id[..8]));
+        std::fs::write(&http_partial, b"partial").expect("write HTTP partial");
+        std::fs::create_dir_all(&parts_dir).expect("create range parts folder");
+        std::fs::write(parts_dir.join("part-000"), b"range").expect("write range part");
+        std::fs::write(&extractor_partial, b"extractor partial").expect("write extractor partial");
+
+        let manager = DownloadManager::default();
+        let mut record = queued_record(id);
+        record.destination = root.display().to_string();
+        record.file_path = Some(target.display().to_string());
+        manager.records.lock().expect("lock records").insert(id.to_string(), record);
+
+        cleanup_cancelled_files(&manager, id);
+        assert!(!http_partial.exists());
+        assert!(!parts_dir.exists());
+        assert!(!extractor_partial.exists());
+        std::fs::remove_dir_all(root).expect("remove cancellation test folder");
     }
 
     #[test]
