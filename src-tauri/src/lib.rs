@@ -792,6 +792,17 @@ async fn download_open_hls(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn configure_no_console(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.as_std_mut().creation_flags(0x08000000);
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = command;
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn configure_tool_environment(command: &mut Command, tool_path: &Path) {
     if let Some(parent) = tool_path.parent() {
         let mut paths: Vec<PathBuf> = std::env::split_paths(
@@ -881,6 +892,49 @@ mod lite_mode_tests {
     }
 }
 
+#[tauri::command]
+fn supports_folder_picker() -> bool {
+    cfg!(not(any(target_os = "android", target_os = "ios")))
+}
+
+#[tauri::command]
+async fn reveal_download(manager: State<'_, DownloadManager>, id: String) -> Result<(), String> {
+    let path = {
+        let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+        records.get(&id).and_then(|record| record.file_path.clone())
+            .ok_or_else(|| "The completed download has no saved file path.".to_string())?
+    };
+    let file = PathBuf::from(path);
+    if !file.is_file() {
+        return Err("The downloaded file is no longer available at the saved path.".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let mut command = Command::new("explorer.exe");
+        command.arg(format!("/select,{}", file.display()));
+        configure_no_console(&mut command);
+        command.spawn().map_err(|error| format!("Could not open File Explorer: {error}"))?;
+        Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg("-R").arg(&file).spawn()
+            .map_err(|error| format!("Could not reveal the file in Finder: {error}"))?;
+        Ok(())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let folder = file.parent().ok_or_else(|| "The file has no parent folder.".to_string())?;
+        Command::new("xdg-open").arg(folder).spawn()
+            .map_err(|error| format!("Could not open the download folder: {error}"))?;
+        Ok(())
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        Err("Show in folder is available in desktop builds.".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
@@ -889,7 +943,7 @@ pub fn run() {
     let builder = builder.plugin(tauri_plugin_media::init());
     builder
         .invoke_handler(tauri::generate_handler![
-            start_download, get_downloads, cancel_download, clear_finished, check_engines
+            start_download, get_downloads, cancel_download, clear_finished, check_engines, supports_folder_picker, reveal_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running DownBest");
