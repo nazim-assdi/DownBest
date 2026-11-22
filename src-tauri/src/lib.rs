@@ -196,6 +196,10 @@ fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
     if let Some(path) = file_path {
         let partial = PathBuf::from(format!("{path}.downbest-{id}.tmp"));
         let _ = std::fs::remove_file(partial);
+        let checkpoint = PathBuf::from(format!("{path}.downbest-{id}.hls.json"));
+        let _ = std::fs::remove_file(&checkpoint);
+        let checkpoint_staging = checkpoint.with_extension("hls.tmp");
+        let _ = std::fs::remove_file(checkpoint_staging);
     }
     let parts = destination.join(format!(".downbest-{id}"));
     let _ = std::fs::remove_dir_all(parts);
@@ -1583,10 +1587,14 @@ mod lite_mode_tests {
         let http_partial = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
         let parts_dir = root.join(format!(".downbest-{id}"));
         let extractor_partial = root.join(format!("sample - {}.mp4.part", &id[..8]));
+        let hls_checkpoint = PathBuf::from(format!("{}.downbest-{}.hls.json", target.display(), id));
+        let hls_staging = hls_checkpoint.with_extension("hls.tmp");
         std::fs::write(&http_partial, b"partial").expect("write HTTP partial");
         std::fs::create_dir_all(&parts_dir).expect("create range parts folder");
         std::fs::write(parts_dir.join("part-000"), b"range").expect("write range part");
         std::fs::write(&extractor_partial, b"extractor partial").expect("write extractor partial");
+        std::fs::write(&hls_checkpoint, b"checkpoint").expect("write HLS checkpoint");
+        std::fs::write(&hls_staging, b"staging").expect("write HLS checkpoint staging");
 
         let manager = DownloadManager::default();
         let mut record = queued_record(id);
@@ -1598,6 +1606,8 @@ mod lite_mode_tests {
         assert!(!http_partial.exists());
         assert!(!parts_dir.exists());
         assert!(!extractor_partial.exists());
+        assert!(!hls_checkpoint.exists());
+        assert!(!hls_staging.exists());
         std::fs::remove_dir_all(root).expect("remove cancellation test folder");
     }
 
