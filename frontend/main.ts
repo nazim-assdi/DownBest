@@ -150,6 +150,8 @@ function renderDownloads() {
     const paused = d.status === "Paused";
     const queued = d.status === "Queued";
     const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" : paused ? "paused" : queued ? "queued" : "running";
+    const statusLabel = d.status === "Connecting" ? "Preparing" :
+      d.status === "Extracting media" ? "Finding media" : d.status;
     const sizeDetail = d.total_bytes
       ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
       : bytes(d.downloaded_bytes) + " downloaded";
@@ -182,7 +184,7 @@ function renderDownloads() {
         : paused || failedItem || cancelled
           ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
           : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
-    return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(d.status) + '</span></div><p>' + detail + '</p><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><div class="download-meta"><span>' + (done ? "100% complete" : pct.toFixed(1) + "%") + ' <em>·</em> ' + safe(d.kind.toUpperCase()) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
+    return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><div class="download-meta"><span>' + (done ? "100% complete" : pct.toFixed(1) + "%") + ' <em>·</em> ' + safe(d.kind.toUpperCase()) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
   }).join("");
 }
 
