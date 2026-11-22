@@ -49,16 +49,11 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 val request = YtDlpRequest(args.url)
                     .setOutputTemplate(template)
                     .addOption("--no-playlist")
-                    .addOption("--continue")
-                    .addOption("--retries", "10")
-                    .addOption("--fragment-retries", "10")
-                    .addOption("--file-access-retries", "3")
-                    .addOption("-N", args.concurrency.coerceIn(1, 16).toString())
                     .addOption("--newline")
 
                 when (args.kind) {
                     "audio" -> request.addOption("-f", "bestaudio/best")
-                    "video-only" -> request.addOption("-f", "bestvideo/best")
+                    "video-only" -> request.addOption("-f", "bestvideo")
                     "video" -> request.addOption("-f", "best[ext=mp4]/best")
                     else -> request.addOption("-f", "best[ext=mp4]/best")
                 }
