@@ -9,7 +9,7 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Lite mode is the default: 2 HTTP range connections, at most 2 simultaneous jobs, and an 8 MiB target chunk size to avoid excessive parallel work.
 - Balanced mode uses 4 connections; High throughput mode uses 8. The server must support byte ranges for parallel downloads.
 - A server capability probe, identity encoding for reliable byte offsets, and automatic single-connection fallback when range requests are unsupported or rejected.
-- Multi-link batch submission: paste up to 50 HTTP/HTTPS URLs (one per line); all valid jobs enter the queue and up to 2 execute simultaneously while the rest wait in queue.
+- Multi-link batch submission: paste up to 50 HTTP/HTTPS URLs (one per line); all valid jobs enter the queue and up to 2 execute simultaneously while the rest wait in queue. Concurrent downloads reserve unique output filenames so same-name files do not overwrite each other.
 - Atomic progress counters avoid a shared mutex on every received network chunk.
 - 256 KiB buffered disk writes reduce small write operations; the UI refreshes active downloads every 650 ms and slows down while idle or hidden.
 - Eye Comfort is the default UI theme, with Midnight and Soft Light options, locally persisted appearance preferences, reduced motion and larger text controls; the interface uses system fonts and works without a remote font request.
