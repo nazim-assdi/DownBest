@@ -48,6 +48,82 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+      - name: Prepare bundled media tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tools = "src-tauri/tools"
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          Invoke-WebRequest "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "$tools/yt-dlp.exe"
+          $ariaZip = "$env:RUNNER_TEMP/aria2.zip"
+          Invoke-WebRequest "https://github.com/aria2/aria2/releases/download/release-1.37.0/aria2-1.37.0-win-64bit-build1.zip" -OutFile $ariaZip
+          Expand-Archive $ariaZip "$env:RUNNER_TEMP/aria2" -Force
+          $ariaExe = Get-ChildItem "$env:RUNNER_TEMP/aria2" -Recurse -Filter aria2c.exe | Select-Object -First 1
+          if (-not $ariaExe) { throw "aria2c.exe was not found in the upstream release." }
+          Copy-Item $ariaExe.FullName "$tools/aria2c.exe"
+          Get-ChildItem $ariaExe.DirectoryName -File | Where-Object { $_.Extension -eq ".dll" } | Copy-Item -Destination $tools
+          $ffZip = "$env:RUNNER_TEMP/ffmpeg.zip"
+          Invoke-WebRequest "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip" -OutFile $ffZip
+          Expand-Archive $ffZip "$env:RUNNER_TEMP/ffmpeg" -Force
+          $ffExe = Get-ChildItem "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ffExe) { throw "FFmpeg executable was not found in the LGPL build." }
+          Get-ChildItem $ffExe.DirectoryName -File | Copy-Item -Destination $tools
+          Get-ChildItem $tools -File | ForEach-Object { if ($_.Extension -eq ".exe") { Unblock-File $_ } }
+      - name: Prepare bundled media tools (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="src-tauri/tools"
+          mkdir -p "$tools/lib"
+          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" -o "$tools/yt-dlp"
+          chmod +x "$tools/yt-dlp"
+          sudo apt-get install -y aria2 patchelf
+          cp "$(command -v aria2c)" "$tools/aria2c"
+          ldd "$tools/aria2c" | awk '/=> \\// {print $3} /^\\// {print $1}' | sort -u | while read -r dep; do
+            base="$(basename "$dep")"
+            case "$base" in libc.so*|libm.so*|libpthread.so*|librt.so*|libdl.so*|ld-linux*) continue ;; esac
+            if [ -f "$dep" ]; then cp -L "$dep" "$tools/lib/$base"; fi
+          done
+          patchelf --set-rpath '$ORIGIN/lib' "$tools/aria2c"
+          ff="$RUNNER_TEMP/ffmpeg-linux.tar.xz"
+          curl -fsSL "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz" -o "$ff"
+          mkdir -p "$RUNNER_TEMP/ffmpeg-linux"
+          tar -xJf "$ff" -C "$RUNNER_TEMP/ffmpeg-linux"
+          ffmpeg_bin="$(find "$RUNNER_TEMP/ffmpeg-linux" -type f -name ffmpeg | head -n 1)"
+          ffprobe_bin="$(find "$RUNNER_TEMP/ffmpeg-linux" -type f -name ffprobe | head -n 1)"
+          test -n "$ffmpeg_bin"
+          cp "$ffmpeg_bin" "$tools/ffmpeg"
+          if [ -n "$ffprobe_bin" ]; then cp "$ffprobe_bin" "$tools/ffprobe"; fi
+          chmod +x "$tools/ffmpeg" "$tools/ffprobe" "$tools/aria2c"
+      - name: Prepare bundled media tools (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="src-tauri/tools"
+          mkdir -p "$tools/lib"
+          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o "$tools/yt-dlp"
+          chmod +x "$tools/yt-dlp"
+          brew install aria2 dylibbundler
+          cp "$(brew --prefix aria2)/bin/aria2c" "$tools/aria2c"
+          dylibbundler -b -x "$tools/aria2c" -d "$tools/lib" -p @executable_path/lib
+          curl -fsSL "https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz" -o "$RUNNER_TEMP/ffmpeg-9.1.tar.xz"
+          tar -xf "$RUNNER_TEMP/ffmpeg-9.1.tar.xz" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/ffmpeg-9.1"
+          ./configure --prefix="$RUNNER_TEMP/ffmpeg-install" --disable-gpl --disable-nonfree --disable-autodetect --enable-static --disable-shared --disable-debug --disable-doc --disable-ffplay
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          cp "$RUNNER_TEMP/ffmpeg-install/bin/ffmpeg" "$tools/ffmpeg"
+          cp "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe" "$tools/ffprobe"
+          chmod +x "$tools/aria2c" "$tools/ffmpeg" "$tools/ffprobe"
+      - name: Verify bundled tools
+        shell: bash
+        run: |
+          find src-tauri/tools -maxdepth 2 -type f -print
+          test -f src-tauri/tools/yt-dlp -o -f src-tauri/tools/yt-dlp.exe
+          test -f src-tauri/tools/aria2c -o -f src-tauri/tools/aria2c.exe
+          test -f src-tauri/tools/ffmpeg -o -f src-tauri/tools/ffmpeg.exe
       - name: Install frontend dependencies
         run: npm install
       - name: Generate app icons
