@@ -965,10 +965,10 @@ async fn execute_download(
         return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, cookies_file.as_deref(), format_selector.as_deref(), &cancel).await;
     }
     let name = suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8]));
-    let target = unique_path(&manager, &id, &destination, &name)?;
+    let mut target = unique_path(&manager, &id, &destination, &name)?;
     set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     set_status(&manager, &id, "Downloading", None);
-    download_http(&client, &url, &target, &destination, &id, concurrency, &manager, &cancel).await?;
+    download_http(&client, &url, &mut target, &destination, &id, concurrency, &manager, &cancel).await?;
     set_file_path(&manager, &id, &target);
     Ok(())
 }
@@ -1017,14 +1017,121 @@ fn needs_media_extractor(url: &Url) -> bool {
     let path = url.path().to_ascii_lowercase();
     path.ends_with(".m3u8") || path.ends_with(".mpd")
 }
-fn suggested_name(url: &Url) -> Option<String> {
-    let raw = url.path_segments()?.filter(|s| !s.is_empty()).last()?;
-    let decoded = raw.replace("%20", " ").replace("%2E", ".");
-    let safe: String = decoded.chars().filter(|c| !c.is_control()
-        && !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')).take(170).collect();
-    let safe = safe.trim().trim_matches('.').to_string();
-    if safe.is_empty() { None } else { Some(safe) }
+fn percent_decode(raw: &str, plus_as_space: bool) -> String {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = |value: u8| -> Option<u8> {
+                match value {
+                    b'0'..=b'9' => Some(value - b'0'),
+                    b'a'..=b'f' => Some(value - b'a' + 10),
+                    b'A'..=b'F' => Some(value - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        if plus_as_space && bytes[index] == b'+' {
+            decoded.push(b' ');
+        } else {
+            decoded.push(bytes[index]);
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
+
+fn sanitize_download_filename(raw: &str) -> Option<String> {
+    let decoded = percent_decode(raw, false);
+    let basename = decoded.rsplit(['/', '\\']).next()?;
+    let safe: String = basename.chars()
+        .filter(|character| !character.is_control()
+            && !matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'))
+        .take(170)
+        .collect();
+    let safe = safe.trim().trim_matches('.').to_string();
+    if safe.is_empty() || safe == "." || safe == ".." { None } else { Some(safe) }
+}
+
+fn parse_content_disposition_filename(value: &str) -> Option<String> {
+    let mut plain = None;
+    for parameter in value.split(';').skip(1) {
+        let Some((key, raw_value)) = parameter.trim().split_once('=') else { continue; };
+        let key = key.trim();
+        let raw_value = raw_value.trim().trim_matches('"')
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\");
+        if key.eq_ignore_ascii_case("filename*") {
+            let encoded = raw_value.split_once("''").map(|(_, value)| value)
+                .unwrap_or(raw_value.as_str());
+            if let Some(filename) = sanitize_download_filename(&percent_decode(encoded, false)) {
+                return Some(filename);
+            }
+        } else if key.eq_ignore_ascii_case("filename") && plain.is_none() {
+            plain = sanitize_download_filename(&raw_value);
+        }
+    }
+    plain
+}
+
+fn extension_for_content_type(content_type: &str) -> Option<&'static str> {
+    let mime = content_type.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    match mime.as_str() {
+        "application/pdf" => Some("pdf"),
+        "application/zip" | "application/x-zip-compressed" => Some("zip"),
+        "application/x-7z-compressed" => Some("7z"),
+        "application/vnd.rar" | "application/x-rar-compressed" => Some("rar"),
+        "application/gzip" | "application/x-gzip" => Some("gz"),
+        "application/x-tar" => Some("tar"),
+        "application/json" => Some("json"),
+        "text/plain" => Some("txt"),
+        "text/csv" => Some("csv"),
+        "image/jpeg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/mp4" => Some("m4a"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        _ => None,
+    }
+}
+
+fn response_suggested_name(response: &Response) -> Option<String> {
+    let disposition = response.headers().get(header::CONTENT_DISPOSITION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_content_disposition_filename);
+    let name = disposition.or_else(|| suggested_name(response.url()))?;
+    let content_type = response.headers().get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok()).unwrap_or("");
+    if Path::new(&name).extension().is_none() {
+        if let Some(extension) = extension_for_content_type(content_type) {
+            return Some(format!("{name}.{extension}"));
+        }
+    }
+    Some(name)
+}
+
+fn suggested_name(url: &Url) -> Option<String> {
+    for (key, value) in url.query_pairs() {
+        if matches!(key.to_ascii_lowercase().as_str(), "filename" | "file_name" | "file" | "name") {
+            if let Some(name) = sanitize_download_filename(&value) {
+                return Some(name);
+            }
+        }
+    }
+    let raw = url.path_segments()?.filter(|segment| !segment.is_empty()).last()?;
+    sanitize_download_filename(raw)
+}
+
 fn unique_path(manager: &DownloadManager, id: &str, dir: &Path, name: &str) -> Result<PathBuf, String> {
     let original = Path::new(name);
     let stem = original.file_stem().and_then(|s| s.to_str()).unwrap_or("download");
@@ -1062,6 +1169,42 @@ fn unique_path(manager: &DownloadManager, id: &str, dir: &Path, name: &str) -> R
     persist_records(manager);
     Ok(path)
 }
+
+fn reserve_response_path(
+    manager: &DownloadManager, id: &str, dir: &Path, name: &str,
+) -> Result<PathBuf, String> {
+    let original = Path::new(name);
+    let stem = original.file_stem().and_then(|value| value.to_str()).unwrap_or("download");
+    let extension = original.extension().and_then(|value| value.to_str());
+    let mut records = manager.records.lock()
+        .map_err(|_| "Download queue is unavailable.".to_string())?;
+    for index in 0..10_000 {
+        let candidate = if index == 0 { name.to_string() }
+            else if let Some(extension) = extension {
+                format!("{stem} ({index}).{extension}")
+            } else {
+                format!("{stem} ({index})")
+            };
+        let path = dir.join(candidate);
+        let path_text = path.to_string_lossy().into_owned();
+        let reserved = records.iter().any(|(record_id, record)| record_id != id
+            && record.file_path.as_ref().map(|existing| {
+                if cfg!(windows) { existing.eq_ignore_ascii_case(&path_text) } else { existing == &path_text }
+            }).unwrap_or(false));
+        if !path.exists() && !reserved {
+            let record = records.get_mut(id)
+                .ok_or_else(|| "Download record was not found.".to_string())?;
+            record.file_name = path.file_name().and_then(|value| value.to_str())
+                .unwrap_or(name).to_string();
+            record.file_path = Some(path_text);
+            drop(records);
+            persist_records(manager);
+            return Ok(path);
+        }
+    }
+    Err("Could not reserve a unique filename for this download.".into())
+}
+
 fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
     const MIN_PARALLEL_FILE: u64 = 16 * 1024 * 1024;
     const TARGET_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
@@ -1072,14 +1215,25 @@ fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
     requested.min(((total_bytes / TARGET_SEGMENT_BYTES).max(1)) as usize).max(1)
 }
 
-fn parse_content_range(value: Option<&header::HeaderValue>) -> Option<u64> {
+fn parse_content_range_span(
+    value: Option<&header::HeaderValue>,
+) -> Option<(u64, u64, Option<u64>)> {
     let raw = value?.to_str().ok()?;
-    let (_, total) = raw.split_once('/')?;
-    if total == "*" { None } else { total.parse().ok() }
+    let raw = raw.strip_prefix("bytes ")?;
+    let (range, total) = raw.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse::<u64>().ok()?;
+    let end = end.parse::<u64>().ok()?;
+    if end < start { return None; }
+    let total = if total == "*" { None } else { Some(total.parse::<u64>().ok()?) };
+    if total.is_some_and(|value| value <= end) { return None; }
+    Some((start, end, total))
+}
+fn parse_content_range(value: Option<&header::HeaderValue>) -> Option<u64> {
+    parse_content_range_span(value).and_then(|(_, _, total)| total)
 }
 fn parse_content_range_start(value: Option<&header::HeaderValue>) -> Option<u64> {
-    let raw = value?.to_str().ok()?;
-    raw.strip_prefix("bytes ")?.split('-').next()?.parse().ok()
+    parse_content_range_span(value).map(|(start, _, _)| start)
 }
 fn set_validators(manager: &DownloadManager, id: &str, etag: Option<String>, last_modified: Option<String>) {
     if let Ok(mut records) = manager.records.lock() {
@@ -1105,28 +1259,60 @@ async fn response_from_offset(
     }
     let response = request.send().await.map_err(|e| format!("Resume request failed: {e}"))?;
     if response.status() == StatusCode::PARTIAL_CONTENT {
-        if parse_content_range_start(response.headers().get(header::CONTENT_RANGE)) == Some(offset) {
-            return Ok((response, true));
+        let (start, end, total) = parse_content_range_span(response.headers().get(header::CONTENT_RANGE))
+            .ok_or_else(|| "The server returned an invalid Content-Range while resuming.".to_string())?;
+        if start != offset || total.is_some_and(|value| end + 1 != value) {
+            return Err("The server returned a mismatched Content-Range while resuming.".into());
         }
-        return Err("The server returned a mismatched Content-Range while resuming.".into());
+        if response.content_length().is_some_and(|length| length != end - start + 1) {
+            return Err("The server returned an inconsistent Content-Length while resuming.".into());
+        }
+        return Ok((response, true));
     }
     if response.status().is_success() { return Ok((response, false)); }
     Err(format!("Server returned HTTP {} while resuming.", response.status()))
 }
 
 async fn download_http(
-    client: &Client, url: &str, target: &Path, destination: &Path, id: &str,
+    client: &Client, url: &str, target: &mut PathBuf, destination: &Path, id: &str,
     concurrency: usize, manager: &DownloadManager, cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
+    let original_temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
+    let previous_len = fs::metadata(&original_temp).await.map(|meta| meta.len()).unwrap_or(0);
     let parts_dir = destination.join(format!(".downbest-{id}"));
-    let previous_len = fs::metadata(&temp).await.map(|meta| meta.len()).unwrap_or(0);
     let (previous_etag, previous_modified) = saved_validators(manager, id);
     let probe = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         client.get(url).header(header::RANGE, "bytes=0-0").send(),
     ).await.map_err(|_| "The server did not respond to the download probe within 30 seconds.".to_string())?
         .map_err(|e| format!("Connection failed: {e}"))?;
+
+    let probe_total = if probe.status() == StatusCode::PARTIAL_CONTENT {
+        let (start, end, total) = parse_content_range_span(probe.headers().get(header::CONTENT_RANGE))
+            .ok_or_else(|| "The server returned an invalid Content-Range header.".to_string())?;
+        if start != 0 || end != 0 {
+            return Err("The server returned an unexpected range while checking the download.".into());
+        }
+        total.ok_or_else(|| "The server supports ranges but did not report the total file size.".to_string())?
+    } else if probe.status().is_success() {
+        probe.content_length().unwrap_or(0)
+    } else {
+        return Err(format!("Server returned HTTP {} while checking range support.", probe.status()));
+    };
+    let probe_total = if probe_total == 0 { None } else { Some(probe_total) };
+
+    // Resolve redirects, Content-Disposition filenames and MIME extensions before creating
+    // the partial file, so opaque links such as /download?id=... are saved correctly.
+    if previous_len == 0 {
+        if let Some(remote_name) = response_suggested_name(&probe) {
+            let current_name = target.file_name().and_then(|value| value.to_str()).unwrap_or("");
+            if remote_name != current_name {
+                *target = reserve_response_path(manager, id, destination, &remote_name)?;
+            }
+        }
+    }
+    let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
+
     let current_etag = probe.headers().get(header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
     let current_modified = probe.headers().get(header::LAST_MODIFIED).and_then(|v| v.to_str().ok()).map(str::to_string);
     let changed = previous_etag.as_ref().map(|old| current_etag.as_ref() != Some(old)).unwrap_or(false)
@@ -1138,14 +1324,14 @@ async fn download_http(
     }
     set_validators(manager, id, current_etag.clone(), current_modified.clone());
     let mut partial_len = if changed { 0 } else { previous_len };
+    set_total(manager, id, probe_total);
 
     if probe.status() == StatusCode::PARTIAL_CONTENT {
-        let total = parse_content_range(probe.headers().get(header::CONTENT_RANGE))
-            .ok_or_else(|| "The server returned an invalid Content-Range header.".to_string())?;
-        set_total(manager, id, Some(total));
+        let total = probe_total.ok_or_else(|| "The server did not report the total file size.".to_string())?;
         if partial_len == total && total > 0 {
             drop(probe);
-            fs::rename(&temp, target).await.map_err(|e| format!("Could not finalize recovered download: {e}"))?;
+            fs::rename(&temp, target.as_path()).await
+                .map_err(|e| format!("Could not finalize recovered download: {e}"))?;
             return Ok(());
         }
         let has_segment_parts = fs::metadata(&parts_dir).await.map(|m| m.is_dir()).unwrap_or(false);
@@ -1153,51 +1339,101 @@ async fn download_http(
         if count > 1 || has_segment_parts {
             drop(probe);
             let progress = progress_counter(manager, id)?;
-            match download_segmented(client, url, target, destination, id, total, count, progress, cancel).await {
+            match download_segmented(client, url, target.as_path(), destination, id, total, count, progress, cancel).await {
                 Ok(()) => Ok(()),
                 Err(error) if error == "Cancelled" => Err(error),
                 Err(error) if error.contains("stopped supporting parallel ranges") => {
                     let _ = fs::remove_dir_all(&parts_dir).await;
                     reset_progress(manager, id);
-                    let response = client.get(url).send().await.map_err(|e| format!("Parallel download failed and fallback connection failed: {e}"))?;
-                    if !response.status().is_success() { return Err(format!("Parallel download fallback returned HTTP {}", response.status())); }
-                    stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel, false, 0).await
+                    let response = client.get(url).send().await
+                        .map_err(|e| format!("Parallel download failed and fallback connection failed: {e}"))?;
+                    if !response.status().is_success() {
+                        return Err(format!("Parallel download fallback returned HTTP {}", response.status()));
+                    }
+                    stream_to_target(response, target.as_path(), id, manager, progress_counter(manager, id)?,
+                        cancel, false, 0, Some(total)).await
                 }
                 Err(error) => Err(error),
             }
         } else {
             drop(probe);
             let (response, append) = if partial_len > 0 {
-                let (response, append) = response_from_offset(client, url, partial_len, current_etag.as_deref(), current_modified.as_deref()).await?;
+                let (response, append) = response_from_offset(
+                    client, url, partial_len, current_etag.as_deref(), current_modified.as_deref()
+                ).await?;
                 if !append { partial_len = 0; }
                 (response, append)
             } else {
-                let response = client.get(url).send().await.map_err(|e| format!("Download request failed: {e}"))?;
-                if !response.status().is_success() { return Err(format!("Server returned HTTP {}", response.status())); }
+                let response = client.get(url).send().await
+                    .map_err(|e| format!("Download request failed: {e}"))?;
+                if !response.status().is_success() {
+                    return Err(format!("Server returned HTTP {}", response.status()));
+                }
                 (response, false)
             };
-            stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel, append, partial_len).await
+            stream_to_target(response, target.as_path(), id, manager, progress_counter(manager, id)?,
+                cancel, append, partial_len, Some(total)).await
         }
     } else if probe.status().is_success() {
-        let total = probe.content_length();
-        set_total(manager, id, total);
+        let total = probe_total;
         let (response, append) = if partial_len > 0 {
-            let (response, append) = response_from_offset(client, url, partial_len, current_etag.as_deref(), current_modified.as_deref()).await?;
+            let (response, append) = response_from_offset(
+                client, url, partial_len, current_etag.as_deref(), current_modified.as_deref()
+            ).await?;
             if !append { partial_len = 0; }
             (response, append)
         } else {
             (probe, false)
         };
-        stream_to_target(response, target, id, manager, progress_counter(manager, id)?, cancel, append, partial_len).await
+        stream_to_target(response, target.as_path(), id, manager, progress_counter(manager, id)?,
+            cancel, append, partial_len, total).await
     } else {
-        Err(format!("Server returned HTTP {} while checking range support.", probe.status()))
+        Err("Unexpected HTTP response while starting the download.".into())
     }
 }
 
 async fn stream_to_target(
     response: Response, target: &Path, id: &str, _manager: &DownloadManager,
     progress: Arc<AtomicU64>, cancel: &CancellationToken, append: bool, initial_offset: u64,
+    expected_total: Option<u64>,
 ) -> Result<(), String> {
+    if !response.status().is_success() {
+        return Err(format!("Server returned HTTP {} while downloading.", response.status()));
+    }
+    let response_range = if response.status() == StatusCode::PARTIAL_CONTENT {
+        Some(parse_content_range_span(response.headers().get(header::CONTENT_RANGE))
+            .ok_or_else(|| "The server returned an invalid Content-Range while downloading.".to_string())?)
+    } else {
+        None
+    };
+    if let Some((start, end, total)) = response_range {
+        if start != initial_offset || total.is_some_and(|value| end + 1 != value) {
+            return Err("The download response did not match the requested byte range.".into());
+        }
+        if total.is_some() && expected_total.is_some() && total != expected_total {
+            return Err("The file size changed while the download was in progress. Resume the download to restart safely.".into());
+        }
+        let range_length = end - start + 1;
+        if response.content_length().is_some_and(|length| length != range_length) {
+            return Err("The server returned an inconsistent Content-Length for the requested range.".into());
+        }
+    }
+    let expected_body = response_range.map(|(start, end, _)| end - start + 1)
+        .or_else(|| response.content_length());
+    let final_expected_total = response_range.and_then(|(_, _, total)| total)
+        .or(expected_total)
+        .or_else(|| response.content_length().map(|length| initial_offset.saturating_add(length)));
+    if final_expected_total.is_some_and(|total| initial_offset > total) {
+        return Err("The saved partial file is larger than the current source file.".into());
+    }
+    if response.status() != StatusCode::PARTIAL_CONTENT
+        && expected_total.is_some()
+        && response.content_length().is_some_and(|length| Some(length) != expected_total)
+        && initial_offset == 0
+    {
+        return Err("The server's file size changed between the probe and download request.".into());
+    }
+
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
     let mut options = OpenOptions::new();
     options.create(true).write(true);
@@ -1207,14 +1443,27 @@ async fn stream_to_target(
     progress.store(if append { initial_offset } else { 0 }, Ordering::Relaxed);
     let mut stream = response.bytes_stream();
     let mut since_sync = 0u64;
-    while let Some(item) = tokio::select! {
-        _ = cancel.cancelled() => {
-            let _ = file.flush().await;
-            let _ = file.get_ref().sync_data().await;
-            return Err("Cancelled".into());
-        },
-        item = stream.next() => item,
-    } {
+    let mut received = 0u64;
+
+    loop {
+        let item = tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = file.flush().await;
+                let _ = file.get_ref().sync_data().await;
+                return Err("Cancelled".into());
+            },
+            result = tokio::time::timeout(std::time::Duration::from_secs(90), stream.next()) => {
+                match result {
+                    Ok(item) => item,
+                    Err(_) => {
+                        let _ = file.flush().await;
+                        let _ = file.get_ref().sync_data().await;
+                        return Err("Download stalled: no data was received for 90 seconds. The partial file is saved; resume to continue.".into());
+                    }
+                }
+            }
+        };
+        let Some(item) = item else { break; };
         let chunk = match item {
             Ok(chunk) => chunk,
             Err(error) => {
@@ -1223,11 +1472,20 @@ async fn stream_to_target(
                 return Err(format!("Network stream interrupted: {error}"));
             }
         };
+        let next_received = received.saturating_add(chunk.len() as u64);
+        if expected_body.is_some_and(|expected| next_received > expected)
+            || final_expected_total.is_some_and(|total| initial_offset.saturating_add(next_received) > total)
+        {
+            let _ = file.flush().await;
+            let _ = file.get_ref().sync_data().await;
+            return Err("The server sent more data than the advertised file size. The partial file was retained.".into());
+        }
         if let Err(error) = file.write_all(&chunk).await {
             let _ = file.flush().await;
             let _ = file.get_ref().sync_data().await;
             return Err(format!("Disk write failed: {error}"));
         }
+        received = next_received;
         add_progress(&progress, chunk.len() as u64);
         since_sync += chunk.len() as u64;
         if since_sync >= 4 * 1024 * 1024 {
@@ -1236,6 +1494,25 @@ async fn stream_to_target(
             since_sync = 0;
         }
     }
+
+    if expected_body.is_some_and(|expected| received != expected) {
+        let _ = file.flush().await;
+        let _ = file.get_ref().sync_data().await;
+        return Err(format!(
+            "Incomplete download: expected {} response bytes but received {}. The partial file was saved; resume to continue.",
+            expected_body.unwrap(), received
+        ));
+    }
+    let final_length = initial_offset.saturating_add(received);
+    if final_expected_total.is_some_and(|expected| final_length != expected) {
+        let _ = file.flush().await;
+        let _ = file.get_ref().sync_data().await;
+        return Err(format!(
+            "Incomplete download: expected a {} byte file but received {} bytes. The partial file was saved; resume to continue.",
+            final_expected_total.unwrap(), final_length
+        ));
+    }
+
     file.flush().await.map_err(|e| format!("Could not flush file: {e}"))?;
     file.get_ref().sync_all().await.map_err(|e| format!("Could not sync file: {e}"))?;
     drop(file);
@@ -1305,8 +1582,13 @@ async fn download_piece(
     if response.status() != StatusCode::PARTIAL_CONTENT {
         return Err(format!("Server stopped supporting parallel ranges (HTTP {}).", response.status()));
     }
-    if parse_content_range_start(response.headers().get(header::CONTENT_RANGE)) != Some(offset) {
-        return Err("Server returned an unexpected range for a saved segment.".into());
+    let (range_start, range_end, range_total) = parse_content_range_span(response.headers().get(header::CONTENT_RANGE))
+        .ok_or_else(|| "Server stopped supporting parallel ranges (invalid Content-Range).".to_string())?;
+    if range_start != offset || range_end != end || range_total.is_some_and(|total| total <= end) {
+        return Err("Server stopped supporting parallel ranges (mismatched Content-Range).".into());
+    }
+    if response.content_length().is_some_and(|length| length != expected - existing) {
+        return Err("Server stopped supporting parallel ranges (mismatched Content-Length).".into());
     }
     let file = OpenOptions::new().create(true).append(true).open(&path)
         .await.map_err(|e| format!("Cannot open segment file: {e}"))?;
@@ -2062,7 +2344,7 @@ mod lite_mode_tests {
         let root = std::env::temp_dir().join(format!("downbest-http-resume-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create test directory");
         let queue_path = root.join("queue.json");
-        let target = root.join("resume.bin");
+        let mut target = root.join("resume.bin");
         let partial = PathBuf::from(format!("{}.downbest-resume-job.tmp", target.display()));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP server");
         listener.set_nonblocking(true).expect("set bounded HTTP accept");
@@ -2143,7 +2425,7 @@ mod lite_mode_tests {
             .enable_all().build().expect("create async runtime");
 
         let first_attempt = runtime.block_on(download_http(
-            &client, &format!("http://{address}/asset.bin"), &target, &root,
+            &client, &format!("http://{address}/asset.bin"), &mut target, &root,
             "resume-job", 1, &manager, &CancellationToken::new()
         ));
         assert!(first_attempt.is_err(), "first connection should be intentionally interrupted");
@@ -2247,6 +2529,33 @@ mod lite_mode_tests {
         assert!(!high_video.is_audio);
         let progressive = formats.iter().find(|item| item.format_id == "18").unwrap();
         assert!(progressive.is_video && progressive.is_audio);
+    }
+
+    #[test]
+    fn parses_extended_content_disposition_filenames_and_sanitizes_paths() {
+        let name = super::parse_content_disposition_filename(
+            "attachment; filename=ignored.zip; filename*=UTF-8''Quarter%20Report%20%E2%80%93%20Final.pdf"
+        ).expect("extended filename");
+        assert_eq!(name, "Quarter Report – Final.pdf");
+        let safe = super::sanitize_download_filename("../../folder/installer%20x.exe")
+            .expect("sanitized path");
+        assert_eq!(safe, "installer x.exe");
+    }
+
+    #[test]
+    fn direct_download_name_uses_query_filename_and_mime_extension() {
+        let url = url::Url::parse("https://cdn.example.test/download?filename=release%20notes").unwrap();
+        let name = super::suggested_name(&url).expect("query filename");
+        assert_eq!(name, "release notes");
+        assert_eq!(super::extension_for_content_type("application/pdf; charset=binary"), Some("pdf"));
+    }
+
+    #[test]
+    fn content_range_parser_checks_start_end_and_total() {
+        let value = header::HeaderValue::from_static("bytes 4096-8191/16384");
+        assert_eq!(super::parse_content_range_span(Some(&value)), Some((4096, 8191, Some(16384))));
+        let invalid = header::HeaderValue::from_static("bytes 8191-4096/16384");
+        assert_eq!(super::parse_content_range_span(Some(&invalid)), None);
     }
 
     #[test]
