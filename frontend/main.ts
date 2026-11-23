@@ -15,6 +15,8 @@ type Download = {
   speed_bytes_sec: number;
   progress: number;
   error: string | null;
+  media_title: string | null;
+  media_thumbnail: string | null;
 };
 type Tool = { name: string; available: boolean; version: string | null };
 type MediaEntry = { id: string; title: string; url: string; thumbnail: string | null; duration: number | null; playlistIndex: number | null };
@@ -154,8 +156,16 @@ function renderDownloads() {
     const cancelled = d.status === "Cancelled";
     const paused = d.status === "Paused";
     const queued = d.status === "Queued";
+    const mediaTitle = d.media_title?.trim() || "";
+    const mediaVisual = mediaTitle
+      ? '<div class="download-media-thumb">' + (mediaImage(d.media_thumbnail) || '<span class="download-media-placeholder">▶</span>') + '<span class="download-media-play">▶</span></div>'
+      : '<div class="file-icon">' + (done ? icons.check : icons.file) + '</div>';
+    const displayName = mediaTitle || d.file_name || d.url;
+    const mediaHeading = '<div class="download-heading"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
+      (mediaTitle ? '<span class="media-type-tag">VIDEO</span>' : '') + '</div>';
     const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" : paused ? "paused" : queued ? "queued" : "running";
-    const statusLabel = d.status === "Connecting" ? "Preparing" :
+    const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
+      d.status === "Connecting" ? "Preparing" :
       d.status === "Extracting media" ? "Finding media" : d.status;
     const sizeDetail = d.total_bytes
       ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
@@ -200,7 +210,7 @@ function renderDownloads() {
           : paused || failedItem
             ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
             : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
-    return '<article class="download ' + statusClass + '"><div class="file-icon">' + (done ? icons.check : icons.file) + '</div><div class="download-body"><div class="download-name"><b title="' + safe(d.file_name || d.url) + '">' + safe(d.file_name || d.url) + '</b><span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div><div class="download-meta"><span>' + (done ? "100% complete" : safe(d.kind.toUpperCase())) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
+    return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' + mediaVisual + '<div class="download-body"><div class="download-name">' + mediaHeading + '<span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div><div class="download-meta"><span>' + (mediaTitle ? "YOUTUBE / MEDIA" : done ? "100% complete" : safe(d.kind.toUpperCase())) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
   }).join("");
 }
 
@@ -352,7 +362,7 @@ document.querySelector<HTMLFormElement>("#download-form")!.addEventListener("sub
   button.innerHTML = '<span class="spinner"></span><b>Adding ' + urls.length + ' links…</b>';
   try {
     const results = await Promise.allSettled(urls.map(url =>
-      invoke("start_download", { url, kind: "auto", destination: destination || null, concurrency, cookies: null, formatSelector: null })
+      invoke("start_download", { url, kind: "auto", destination: destination || null, concurrency, cookies: null, formatSelector: null, mediaTitle: null, mediaThumbnail: null })
     ));
     const added = results.filter(result => result.status === "fulfilled").length;
     const rejected = results.length - added;
@@ -509,7 +519,9 @@ async function downloadSelectedMedia() {
           destination: null,
           concurrency: 8,
           cookies: null,
-          formatSelector: null
+          formatSelector: null,
+          mediaTitle: entry.title,
+          mediaThumbnail: entry.thumbnail
         });
       }));
       added += results.filter(result => result.status === "fulfilled").length;

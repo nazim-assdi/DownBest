@@ -54,6 +54,10 @@ struct PersistedDownload {
     #[serde(default)]
     format_selector: Option<String>,
     #[serde(default)]
+    media_title: Option<String>,
+    #[serde(default)]
+    media_thumbnail: Option<String>,
+    #[serde(default)]
     cancel_requested: bool,
 }
 
@@ -73,6 +77,8 @@ struct DownloadRecord {
     etag: Option<String>, last_modified: Option<String>,
     cookies_file: Option<String>,
     format_selector: Option<String>,
+    media_title: Option<String>,
+    media_thumbnail: Option<String>,
     cancel_requested: Arc<AtomicBool>,
 }
 
@@ -126,6 +132,8 @@ impl DownloadManager {
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
                     format_selector: item.format_selector,
+                    media_title: item.media_title,
+                    media_thumbnail: item.media_thumbnail,
                     cancel_requested: Arc::new(AtomicBool::new(was_cancelled)),
                 });
                 if was_cancelled { cancelled_ids.push(id); }
@@ -153,6 +161,8 @@ fn persist_records(manager: &DownloadManager) {
             etag: record.etag.clone(), last_modified: record.last_modified.clone(),
             cookies_file: record.cookies_file.clone(),
             format_selector: record.format_selector.clone(),
+            media_title: record.media_title.clone(),
+            media_thumbnail: record.media_thumbnail.clone(),
             cancel_requested: record.cancel_requested.load(Ordering::Relaxed),
         }).collect::<Vec<_>>()
     };
@@ -279,6 +289,7 @@ struct DownloadView {
     id: String, url: String, file_name: String, kind: String, status: String,
     destination: String, file_path: Option<String>, downloaded_bytes: u64, total_bytes: Option<u64>,
     speed_bytes_sec: u64, progress: f64, error: Option<String>,
+    media_title: Option<String>, media_thumbnail: Option<String>,
 }
 #[derive(Serialize)]
 struct ToolStatus { name: String, available: bool, version: Option<String> }
@@ -297,6 +308,8 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
             (downloaded as f64 / elapsed) as u64
         } else { 0 },
         progress, error: record.error.clone(),
+        media_title: record.media_title.clone(),
+        media_thumbnail: record.media_thumbnail.clone(),
     }
 }
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
@@ -320,6 +333,16 @@ fn set_total(manager: &DownloadManager, id: &str, total: Option<u64>) {
 fn set_file_name(manager: &DownloadManager, id: &str, name: &str) {
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) { record.file_name = name.to_string(); }
+    }
+}
+fn set_media_title(manager: &DownloadManager, id: &str, title: &str) {
+    let title = title.trim();
+    if title.is_empty() { return; }
+    let title = title.chars().take(512).collect::<String>();
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            record.media_title = Some(title);
+        }
     }
 }
 fn set_file_path(manager: &DownloadManager, id: &str, path: &Path) {
@@ -793,12 +816,22 @@ fn selected_media_format(
 async fn start_download(
     app: AppHandle, manager: State<'_, DownloadManager>, url: String, kind: String,
     destination: Option<String>, concurrency: Option<usize>, cookies: Option<String>,
-    format_selector: Option<String>,
+    format_selector: Option<String>, media_title: Option<String>, media_thumbnail: Option<String>,
 ) -> Result<DownloadView, String> {
     if url.len() > 8192 { return Err("The download URL is too long.".into()); }
     let parsed = Url::parse(&url).map_err(|_| "Enter a valid http:// or https:// URL.".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") { return Err("Only HTTP and HTTPS links are supported.".into()); }
     let kind = normalize_download_kind(&kind).to_string();
+    let media_title = media_title.and_then(|value| {
+        let title = value.trim();
+        (!title.is_empty()).then(|| title.chars().take(512).collect::<String>())
+    });
+    let media_thumbnail = media_thumbnail.and_then(|value| {
+        if value.len() > 4096 { return None; }
+        Url::parse(value.trim()).ok()
+            .filter(|parsed| matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some())
+            .map(|parsed| parsed.to_string())
+    });
     if let Some(selector) = format_selector.as_ref() {
         if selector.is_empty() || selector.len() > 128
             || !selector.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '_' | '-' ))
@@ -835,6 +868,8 @@ async fn start_download(
         concurrency: requested, etag: None, last_modified: None,
         cookies_file: cookies_file.clone(),
         format_selector: format_selector.clone(),
+        media_title,
+        media_thumbnail,
         cancel_requested: Arc::new(AtomicBool::new(false)),
     };
     let initial = view_of(&record);
@@ -1850,6 +1885,7 @@ async fn run_media_download(
         .arg("--file-access-retries").arg("3").arg("-N").arg(concurrency.to_string())
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
+        .arg("--print").arg("before_dl:__DOWNBEST_TITLE__%(title)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
     let selected_format = selected_media_format(kind, format_selector, has_ffmpeg)?;
@@ -1891,6 +1927,12 @@ async fn run_media_download(
     let stdout_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(index) = line.find("__DOWNBEST_TITLE__") {
+                let title = line[index + "__DOWNBEST_TITLE__".len()..].trim();
+                if !title.is_empty() {
+                    set_media_title(&stdout_manager, &stdout_id, title);
+                }
+            }
             if let Some(index) = line.find("__DOWNBEST_FILE__") {
                 let value = line[index + "__DOWNBEST_FILE__".len()..].trim();
                 if !value.is_empty() {
@@ -2333,6 +2375,8 @@ mod lite_mode_tests {
             last_modified: None,
             cookies_file: None,
             format_selector: None,
+            media_title: None,
+            media_thumbnail: None,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
     }
