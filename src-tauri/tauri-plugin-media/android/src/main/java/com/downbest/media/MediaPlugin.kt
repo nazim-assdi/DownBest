@@ -240,13 +240,17 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 val selector = args.formatSelector
+                val exactFormat = selector?.takeIf { it.startsWith("format-") }
+                    ?.removePrefix("format-")
+                    ?.takeIf { it.isNotEmpty() && it.matches(Regex("[A-Za-z0-9._-]+")) }
                 val maxHeight = selector?.takeIf { it.startsWith("max-height-") }
                     ?.removePrefix("max-height-")?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
-                val selectedFormat = when (args.kind) {
-                    "audio" -> "bestaudio/best"
-                    "video-only" -> if (maxHeight != null) "bestvideo[height<=$maxHeight]/bestvideo" else "bestvideo"
-                    else -> if (maxHeight != null) "best[height<=$maxHeight][ext=mp4]/best[height<=$maxHeight]"
-                        else "best[ext=mp4]/best"
+                val selectedFormat = when {
+                    args.kind == "audio" -> "bestaudio/best"
+                    exactFormat != null -> exactFormat
+                    args.kind == "video-only" -> if (maxHeight != null) "bestvideo[height<=$maxHeight]/bestvideo" else "bestvideo"
+                    maxHeight != null -> "best[height<=$maxHeight][ext=mp4][acodec!=none]/best[height<=$maxHeight][acodec!=none]"
+                    else -> "best[ext=mp4][acodec!=none]/best[acodec!=none]"
                 }
                 request.addOption("-f", selectedFormat)
 

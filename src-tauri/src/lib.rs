@@ -1500,9 +1500,18 @@ async fn run_media_download(
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
     let selected_format = match format_selector {
+        Some(selector) if selector.starts_with("format-") => {
+            let format_id = selector.trim_start_matches("format-");
+            if format_id.is_empty() || !format_id.chars().all(|ch|
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
+            ) {
+                return Err("Invalid exact media format selection.".into());
+            }
+            format_id.to_string()
+        }
         Some(selector) if selector.starts_with("max-height-") => {
             let max_height = selector.trim_start_matches("max-height-");
-            if !max_height.chars().all(|ch| ch.is_ascii_digit()) {
+            if !max_height.chars().all(|ch| ch.is_ascii_digit()) || max_height.is_empty() {
                 return Err("Invalid resolution selection.".into());
             }
             match kind {
