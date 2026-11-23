@@ -33,6 +33,7 @@ class DownloadArgs {
     var kind: String = "auto"
     var concurrency: Int = 8
     var cookiesFile: String? = null
+    var formatSelector: String? = null
     var onProgress: Channel? = null
 }
 
@@ -49,6 +50,12 @@ class PublishDownloadArgs {
 @InvokeArg
 class OpenDownloadArgs {
     var contentUri: String = ""
+}
+
+@InvokeArg
+class InspectArgs {
+    var url: String = ""
+    var flatPlaylist: Boolean = true
 }
 
 @TauriPlugin
@@ -138,6 +145,59 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    private fun javascriptRuntimePath(): String? {
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { it == "arm64-v8a" || it == "x86_64" }
+            ?: return null
+        val runtime = File(activity.applicationInfo.nativeLibraryDir, "libqjs.so")
+        if (runtime.isFile && !runtime.canExecute()) runtime.setExecutable(true, false)
+        return runtime.absolutePath.takeIf { runtime.isFile && runtime.canExecute() }
+    }
+
+    private fun addJavascriptRuntime(request: YtDlpRequest): Boolean {
+        val runtime = javascriptRuntimePath() ?: return false
+        request.addOption("--js-runtimes", "quickjs:$runtime")
+        request.addOption("--remote-components", "ejs:github")
+        return true
+    }
+
+    @Command
+    fun inspect(invoke: Invoke) {
+        val args = invoke.parseArgs(InspectArgs::class.java)
+        Thread({
+            try {
+                require(args.url.startsWith("https://") || args.url.startsWith("http://")) {
+                    "Only HTTP and HTTPS media links are supported."
+                }
+                YtDlp.init(activity.applicationContext)
+                val request = YtDlpRequest(args.url)
+                    .addOption("--dump-single-json")
+                    .addOption("--skip-download")
+                    .addOption("--no-warnings")
+                    .addOption("--no-progress")
+                    .addOption("--no-colors")
+                    .addOption("--no-call-home")
+                    .addOption("--socket-timeout", "20")
+                    .addOption("--retries", "2")
+                if (args.flatPlaylist) request.addOption("--flat-playlist")
+                else request.addOption("--no-playlist")
+                val runtimeAvailable = addJavascriptRuntime(request)
+                val response = YtDlp.executeAsync(request, DownloadProgressCallback { _, _, _ -> }).get(180, TimeUnit.SECONDS)
+                val result = JSObject()
+                result.put("output", response.output ?: "")
+                result.put("errorOutput", response.errorOutput ?: "")
+                result.put("exitCode", response.exitCode)
+                if (!response.isSuccess && !runtimeAvailable) {
+                    result.put("errorOutput",
+                        (response.errorOutput ?: "") + "\nDownBest QuickJS runtime was not found in this APK.")
+                }
+                invoke.resolve(result)
+            } catch (error: Exception) {
+                val message = error.cause?.message ?: error.message ?: "Could not inspect this media link."
+                invoke.reject(message)
+            }
+        }, "DownBest-media-inspect").start()
+    }
+
     @Command
     fun download(invoke: Invoke) {
         val args = invoke.parseArgs(DownloadArgs::class.java)
@@ -170,6 +230,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--part")
                     .addOption("--keep-fragments")
 
+                addJavascriptRuntime(request)
                 if (!args.cookiesFile.isNullOrBlank()) {
                     val cookieFile = File(args.cookiesFile!!)
                     require(cookieFile.isFile && cookieFile.canRead()) {
@@ -178,12 +239,16 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     request.addOption("--cookies", cookieFile.absolutePath)
                 }
 
-                when (args.kind) {
-                    "audio" -> request.addOption("-f", "bestaudio/best")
-                    "video-only" -> request.addOption("-f", "bestvideo")
-                    "video" -> request.addOption("-f", "best[ext=mp4]/best")
-                    else -> request.addOption("-f", "best[ext=mp4]/best")
+                val selector = args.formatSelector
+                val maxHeight = selector?.takeIf { it.startsWith("max-height-") }
+                    ?.removePrefix("max-height-")?.takeIf { it.isNotEmpty() && it.all(Char::isDigit) }
+                val selectedFormat = when (args.kind) {
+                    "audio" -> "bestaudio/best"
+                    "video-only" -> if (maxHeight != null) "bestvideo[height<=$maxHeight]/bestvideo" else "bestvideo"
+                    else -> if (maxHeight != null) "best[height<=$maxHeight][ext=mp4]/best[height<=$maxHeight]"
+                        else "best[ext=mp4]/best"
                 }
+                request.addOption("-f", selectedFormat)
 
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 val future = YtDlp.executeAsync(request, DownloadProgressCallback { progress, eta, line ->

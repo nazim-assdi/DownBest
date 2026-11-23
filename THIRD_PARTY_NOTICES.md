@@ -28,6 +28,12 @@ DownBest fetches platform-specific executable tools during release builds and pa
 - Android dependency: `dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.9`, LGPL v3. See https://github.com/ffmpegkit-maintained/ffmpeg and https://central.sonatype.com/artifact/dev.ffmpegkit-maintained/ffmpeg-kit-full.
 - FFmpeg is distributed as a separate executable on desktop; the Android AAR's own licence and source obligations apply to the mobile binary.
 
+## JavaScript challenge runtimes
+
+- **Deno 2.9.8** — desktop JavaScript runtime used by yt-dlp for supported YouTube challenge solving. Project: https://github.com/denoland/deno. License: MIT. CI downloads the official platform-matched release binaries.
+- **QuickJS-NG 0.18.0** — Android JavaScript runtime used by yt-dlp. Project: https://github.com/quickjs-ng/quickjs. License: MIT. CI builds ABI-matched executables from the official source archive with the Android NDK and packages them in the Android media plugin.
+- **yt-dlp EJS remote component** — JavaScript challenge scripts are obtained via yt-dlp's official `ejs:github` remote component source. Project: https://github.com/yt-dlp/ejs. See the upstream repository for its current notices and source terms.
+
 ## Other dependencies
 
 - Tauri, Rust crates and JavaScript dependencies retain their respective upstream licences; see each dependency's package metadata.

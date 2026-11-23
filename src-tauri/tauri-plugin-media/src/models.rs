@@ -10,6 +10,7 @@ pub struct MediaDownloadRequest {
     pub kind: String,
     pub concurrency: usize,
     pub cookies_file: Option<String>,
+    pub format_selector: Option<String>,
     pub on_progress: Channel<MediaProgress>,
 }
 
@@ -69,4 +70,20 @@ pub struct MediaOpenRequest {
 #[serde(rename_all = "camelCase")]
 pub struct MediaOpenResult {
     pub opened: bool,
+}
+
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaInspectRequest {
+    pub url: String,
+    pub flat_playlist: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaInspectResult {
+    pub output: String,
+    pub error_output: String,
+    pub exit_code: i32,
 }

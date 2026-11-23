@@ -15,6 +15,8 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Eye Comfort is the default UI theme, with Midnight and Soft Light options, locally persisted appearance preferences, reduced motion and larger text controls; the interface uses system fonts and works without a remote font request.
 - Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
 - Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests. Both process output streams are drained concurrently: stderr drives live progress and stdout reports the final post-processed file path. Windows extractor processes launch without a visible console window.
+- Media Link Analyzer for YouTube/Facebook and other supported extractors: previews playlist/video entries, shows available resolutions, lets users select all or individual videos, then creates one queue item per selected video so each entry has its own progress, pause, cancel and resume controls.
+- YouTube JavaScript challenge support: desktop packages include Deno 2.9.8 and yt-dlp's EJS challenge scripts; Android packages include an ABI-matched QuickJS runtime built into the APK. The selected maximum resolution is applied per video; the source may offer lower quality or reject extraction.
 - Android bundles yt-dlp with an embedded Python runtime and FFmpegKit for audio-only output; it does not need a separate Python or yt-dlp install.
 - iOS includes a native open-HLS VOD downloader for unencrypted playlists, plus the direct HTTP/HTTPS downloader.
 - Audio-only, video-only and video+audio format selection for media-extractor links.
@@ -38,7 +40,7 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 | Android | APK (ARM64 / x86_64) | Direct HTTP(S) and supported yt-dlp media sites |
 | iOS | IPA | Direct HTTP(S) and open, unencrypted VOD HLS; Apple signing is required |
 
-**Mobile limits:** Android bundles yt-dlp and FFmpegKit, so supported media-site extraction works without separate installations. The Android yt-dlp runtime is compiled for ARM64 and x86_64; it does not include 32-bit ABIs. Finished Android files are copied into the shared Downloads folder through MediaStore on Android 10 and later; incomplete transfer data remains in app-private staging to preserve Pause/Resume. iOS uses its native open-HLS saver only for finite, unencrypted VOD playlists; generic third-party site extraction is not enabled in the App Store build, and its files remain in app-private storage.
+**Mobile limits:** Android bundles yt-dlp, an embedded Python runtime, a QuickJS JavaScript runtime and FFmpegKit; its yt-dlp AAR supports ARM64 and x86_64 only, not 32-bit ABIs. Finished Android files are copied into the shared Downloads folder through MediaStore on Android 10 and later; incomplete transfer data remains in app-private staging to preserve Pause/Resume. iOS uses its native open-HLS saver only for finite, unencrypted VOD playlists; YouTube/Facebook metadata analysis and generic third-party site extraction are not enabled in the App Store build, and its files remain in app-private storage.
 
 yt-dlp supports many extractors, but no application can guarantee that every website, DRM-protected stream, login-gated media item or regional restriction will work. DownBest does not bypass DRM, authentication, access controls or source-server rate limits.
 

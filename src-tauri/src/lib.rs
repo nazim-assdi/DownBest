@@ -10,7 +10,7 @@ use std::{
 use tauri::{AppHandle, Manager, State};
 use tokio::{
     fs::{self, File, OpenOptions},
-    io::{AsyncSeekExt, AsyncWriteExt, BufWriter},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
     sync::Semaphore,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -23,7 +23,7 @@ use std::hash::{Hash, Hasher};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri_plugin_media::{MediaDownloadRequest, MediaExt, MediaProgress};
 #[cfg(target_os = "android")]
-use tauri_plugin_media::{MediaCancelRequest, MediaOpenRequest, MediaPublishRequest};
+use tauri_plugin_media::{MediaCancelRequest, MediaInspectRequest, MediaOpenRequest, MediaPublishRequest};
 
 #[derive(Clone)]
 struct DownloadManager {
@@ -50,6 +50,8 @@ struct PersistedDownload {
     #[serde(default)]
     cookies_file: Option<String>,
     #[serde(default)]
+    format_selector: Option<String>,
+    #[serde(default)]
     cancel_requested: bool,
 }
 
@@ -68,6 +70,7 @@ struct DownloadRecord {
     progress_override: Option<f64>, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
     cookies_file: Option<String>,
+    format_selector: Option<String>,
     cancel_requested: Arc<AtomicBool>,
 }
 
@@ -101,6 +104,7 @@ impl DownloadManager {
                     concurrency: item.concurrency.clamp(1, 8),
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
+                    format_selector: item.format_selector,
                     cancel_requested: Arc::new(AtomicBool::new(was_cancelled)),
                 });
                 if was_cancelled { cancelled_ids.push(id); }
@@ -127,6 +131,7 @@ fn persist_records(manager: &DownloadManager) {
             total_bytes: record.total, error: record.error.clone(), concurrency: record.concurrency,
             etag: record.etag.clone(), last_modified: record.last_modified.clone(),
             cookies_file: record.cookies_file.clone(),
+            format_selector: record.format_selector.clone(),
             cancel_requested: record.cancel_requested.load(Ordering::Relaxed),
         }).collect::<Vec<_>>()
     };
@@ -372,7 +377,8 @@ fn set_progress(manager: &DownloadManager, id: &str, progress: f64) {
 
 fn spawn_download_task(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
-    destination: PathBuf, concurrency: usize, cookies_file: Option<String>, cancel: CancellationToken,
+    destination: PathBuf, concurrency: usize, cookies_file: Option<String>,
+    format_selector: Option<String>, cancel: CancellationToken,
 ) {
     tauri::async_runtime::spawn(async move {
         let saver_manager = manager.clone();
@@ -389,7 +395,7 @@ fn spawn_download_task(
         #[cfg(target_os = "android")]
         let publish_app = app.clone();
         let download_result = execute_download(app, manager.clone(), id.clone(), url, kind,
-            destination, concurrency, cookies_file, cancel.clone()).await;
+            destination, concurrency, cookies_file, format_selector, cancel.clone()).await;
         #[cfg(target_os = "android")]
         let result = if download_result.is_ok() {
             publish_completed_download(&publish_app, &manager, &id).await
@@ -426,10 +432,301 @@ fn spawn_download_task(
     });
 }
 
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MediaEntry {
+    id: String,
+    title: String,
+    url: String,
+    thumbnail: Option<String>,
+    duration: Option<f64>,
+    playlist_index: Option<u64>,
+}
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MediaAnalysis {
+    title: String,
+    url: String,
+    extractor: String,
+    uploader: Option<String>,
+    thumbnail: Option<String>,
+    duration: Option<f64>,
+    is_playlist: bool,
+    entry_count: usize,
+    entries: Vec<MediaEntry>,
+}
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct MediaFormat {
+    format_id: String,
+    ext: String,
+    resolution: String,
+    width: Option<u64>,
+    height: Option<u64>,
+    fps: Option<f64>,
+    filesize: Option<u64>,
+    format_note: Option<String>,
+    vcodec: String,
+    acodec: String,
+    is_video: bool,
+    is_audio: bool,
+}
+
+fn json_text(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| value.get(*key).and_then(|item| {
+        item.as_str().map(str::to_owned)
+            .or_else(|| item.as_i64().map(|n| n.to_string()))
+            .or_else(|| item.as_u64().map(|n| n.to_string()))
+    })).filter(|text| !text.trim().is_empty())
+}
+fn json_number(value: &serde_json::Value, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| value.get(*key).and_then(|item| item.as_f64()))
+        .filter(|number| number.is_finite() && *number >= 0.0)
+}
+fn json_thumbnail(value: &serde_json::Value) -> Option<String> {
+    json_text(value, &["thumbnail"])
+        .or_else(|| value.get("thumbnails").and_then(|items| items.as_array())
+            .and_then(|items| items.iter().rev().find_map(|item| json_text(item, &["url"]))))
+}
+fn entry_url(entry: &serde_json::Value, extractor: &str) -> Option<String> {
+    for key in ["webpage_url", "original_url", "url"] {
+        if let Some(raw) = entry.get(key).and_then(|item| item.as_str()) {
+            if let Ok(parsed) = Url::parse(raw) {
+                if matches!(parsed.scheme(), "http" | "https") { return Some(raw.to_owned()); }
+            }
+        }
+    }
+    let id = json_text(entry, &["id"])?;
+    let source = extractor.to_ascii_lowercase();
+    if source.contains("youtube") {
+        Some(format!("https://www.youtube.com/watch?v={id}"))
+    } else if source.contains("facebook") {
+        Some(format!("https://www.facebook.com/watch/?v={id}"))
+    } else if source.contains("vimeo") {
+        Some(format!("https://vimeo.com/{id}"))
+    } else {
+        None
+    }
+}
+fn parse_media_analysis(raw: &str, source_url: &str) -> Result<MediaAnalysis, String> {
+    let json: serde_json::Value = serde_json::from_str(raw.trim())
+        .map_err(|error| format!("The media service returned invalid metadata: {error}"))?;
+    let extractor = json_text(&json, &["extractor_key", "extractor"]).unwrap_or_else(|| "Media".into());
+    let title = json_text(&json, &["title", "playlist_title"]).unwrap_or_else(|| "Untitled media".into());
+    let url = json_text(&json, &["webpage_url", "original_url"]).unwrap_or_else(|| source_url.to_owned());
+    let raw_entries = json.get("entries").and_then(|items| items.as_array());
+    let is_playlist = raw_entries.is_some() || json_text(&json, &["_type"])
+        .map(|kind| kind == "playlist" || kind == "multi_video").unwrap_or(false);
+    let mut entries = Vec::new();
+    if let Some(items) = raw_entries {
+        entries.reserve(items.len());
+        for (index, entry) in items.iter().enumerate() {
+            if entry.is_null() { continue; }
+            let Some(entry_url) = entry_url(entry, &extractor) else { continue; };
+            let id = json_text(entry, &["id"]).unwrap_or_else(|| format!("item-{}", index + 1));
+            entries.push(MediaEntry {
+                id,
+                title: json_text(entry, &["title"]).unwrap_or_else(|| format!("Video {}", index + 1)),
+                url: entry_url,
+                thumbnail: json_thumbnail(entry),
+                duration: json_number(entry, &["duration"]),
+                playlist_index: entry.get("playlist_index").and_then(|item| item.as_u64())
+                    .or(Some(index as u64 + 1)),
+            });
+        }
+    }
+    if entries.is_empty() && !is_playlist {
+        entries.push(MediaEntry {
+            id: json_text(&json, &["id"]).unwrap_or_else(|| "media-item".into()),
+            title: title.clone(),
+            url: url.clone(),
+            thumbnail: json_thumbnail(&json),
+            duration: json_number(&json, &["duration"]),
+            playlist_index: Some(1),
+        });
+    }
+    let entry_count = json.get("playlist_count").and_then(|item| item.as_u64())
+        .map(|count| count as usize).unwrap_or(entries.len());
+    Ok(MediaAnalysis {
+        title, url, extractor,
+        uploader: json_text(&json, &["uploader", "channel", "creator"]),
+        thumbnail: json_thumbnail(&json),
+        duration: json_number(&json, &["duration"]),
+        is_playlist,
+        entry_count,
+        entries,
+    })
+}
+fn parse_media_formats(raw: &str) -> Result<Vec<MediaFormat>, String> {
+    let json: serde_json::Value = serde_json::from_str(raw.trim())
+        .map_err(|error| format!("The media service returned invalid format data: {error}"))?;
+    let formats = json.get("formats").and_then(|items| items.as_array())
+        .ok_or_else(|| "No downloadable formats were returned for this link. The video may be private, blocked, or require a newer extractor.".to_string())?;
+    let mut result = Vec::new();
+    for format in formats {
+        let Some(format_id) = json_text(format, &["format_id"]) else { continue; };
+        let width = format.get("width").and_then(|item| item.as_u64());
+        let height = format.get("height").and_then(|item| item.as_u64());
+        let ext = json_text(format, &["ext"]).unwrap_or_else(|| "unknown".into());
+        let vcodec = json_text(format, &["vcodec"]).unwrap_or_else(|| "none".into());
+        let acodec = json_text(format, &["acodec"]).unwrap_or_else(|| "none".into());
+        let is_video = vcodec != "none";
+        let is_audio = acodec != "none";
+        let resolution = height.map(|value| format!("{value}p"))
+            .or_else(|| json_text(format, &["resolution"]))
+            .unwrap_or_else(|| if is_audio { "Audio only".into() } else { "Unknown".into() });
+        let filesize = format.get("filesize").and_then(|item| item.as_u64())
+            .or_else(|| format.get("filesize_approx").and_then(|item| item.as_u64()));
+        result.push(MediaFormat {
+            format_id, ext, resolution, width, height,
+            fps: json_number(format, &["fps"]), filesize,
+            format_note: json_text(format, &["format_note", "format"]),
+            vcodec, acodec, is_video, is_audio,
+        });
+    }
+    result.sort_by(|a, b| b.height.cmp(&a.height)
+        .then_with(|| b.filesize.cmp(&a.filesize))
+        .then_with(|| a.ext.cmp(&b.ext)));
+    if result.is_empty() {
+        return Err("No downloadable formats were found. Try another public link.".into());
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn analyze_media(app: AppHandle, url: String) -> Result<MediaAnalysis, String> {
+    if url.len() > 8192 { return Err("The media URL is too long.".into()); }
+    let parsed = Url::parse(&url).map_err(|_| "Enter a valid http:// or https:// media link.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only HTTP and HTTPS media links are supported.".into());
+    }
+    let cancel = CancellationToken::new();
+    let output = inspect_media_json(&app, &url, true, &cancel).await?;
+    parse_media_analysis(&output, &url)
+}
+
+#[tauri::command]
+async fn get_media_formats(app: AppHandle, url: String) -> Result<Vec<MediaFormat>, String> {
+    if url.len() > 8192 { return Err("The media URL is too long.".into()); }
+    let parsed = Url::parse(&url).map_err(|_| "Enter a valid http:// or https:// media link.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only HTTP and HTTPS media links are supported.".into());
+    }
+    let cancel = CancellationToken::new();
+    let output = inspect_media_json(&app, &url, false, &cancel).await?;
+    parse_media_formats(&output)
+}
+
+async fn inspect_media_json(
+    app: &AppHandle,
+    url: &str,
+    flat_playlist: bool,
+    cancel: &CancellationToken,
+) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        let handle = app.clone();
+        let request = MediaInspectRequest { url: url.to_owned(), flat_playlist };
+        let result = tokio::task::spawn_blocking(move || handle.media().inspect(request))
+            .await.map_err(|error| format!("Android media inspection worker failed: {error}"))?
+            .map_err(|error| format!("Android media inspection failed: {error}"))?;
+        if result.exit_code != 0 {
+            let detail = result.error_output.trim();
+            return Err(if detail.is_empty() {
+                format!("The media extractor exited with code {}.", result.exit_code)
+            } else { format!("Media extractor: {}", detail.chars().rev().take(700).collect::<String>().chars().rev().collect::<String>()) });
+        }
+        return Ok(result.output);
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, url, flat_playlist, cancel);
+        return Err("YouTube/Facebook media analysis is not available in the iOS build. Use the desktop or Android build for media links.".into());
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let yt_dlp = find_tool(app, "yt-dlp")
+            .ok_or_else(|| "The media extractor is not installed in this build. Reinstall DownBest using the latest desktop package.".to_string())?;
+        let mut command = Command::new(&yt_dlp);
+        configure_tool_environment(&mut command, &yt_dlp);
+        configure_no_console(&mut command);
+        command.arg("--dump-single-json").arg("--skip-download")
+            .arg("--no-warnings").arg("--no-progress").arg("--no-colors")
+            .arg("--no-call-home").arg("--retries").arg("2").arg("--socket-timeout").arg("20");
+        if flat_playlist {
+            command.arg("--flat-playlist");
+        } else {
+            command.arg("--no-playlist");
+        }
+        if let Some(deno) = find_tool(app, "deno") {
+            command.arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
+        }
+        command.arg("--remote-components").arg("ejs:github")
+            .arg(url)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = command.spawn().map_err(|error| format!("Could not start the media extractor: {error}"))?;
+        let stdout = child.stdout.take().ok_or_else(|| "Could not read media metadata output.".to_string())?;
+        let stderr = child.stderr.take().ok_or_else(|| "Could not read media extractor diagnostics.".to_string())?;
+        let stdout_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stdout);
+            let mut data = Vec::new();
+            let _ = reader.read_to_end(&mut data).await;
+            data
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr);
+            let mut data = Vec::new();
+            let _ = reader.take(64 * 1024).read_to_end(&mut data).await;
+            data
+        });
+        let status = tokio::select! {
+            _ = cancel.cancelled() => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                stdout_task.abort();
+                stderr_task.abort();
+                return Err("Media inspection was cancelled.".into());
+            }
+            result = tokio::time::timeout(std::time::Duration::from_secs(180), child.wait()) => {
+                match result {
+                    Ok(Ok(status)) => status,
+                    Ok(Err(error)) => return Err(format!("Media extractor process failed: {error}")),
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        stdout_task.abort();
+                        stderr_task.abort();
+                        return Err("The media extractor did not respond within 3 minutes.".into());
+                    }
+                }
+            }
+        };
+        let stdout = stdout_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
+        let output = String::from_utf8_lossy(&stdout).trim().to_owned();
+        if status.success() && !output.is_empty() {
+            return Ok(output);
+        }
+        let mut detail = String::from_utf8_lossy(&stderr).trim().to_owned();
+        if detail.is_empty() { detail = output; }
+        if detail.to_ascii_lowercase().contains("javascript runtime") || detail.to_ascii_lowercase().contains("ejs") {
+            return Err("YouTube needs the JavaScript challenge runtime. Update DownBest to a build that includes the media-runtime package, then Analyze again.".into());
+        }
+        if detail.is_empty() {
+            return Err(format!("Media extraction failed with process status {status}."));
+        }
+        let tail: String = detail.chars().rev().take(900).collect::<String>().chars().rev().collect();
+        Err(format!("Media extraction failed: {tail}"))
+    }
+}
+
 #[tauri::command]
 async fn start_download(
     app: AppHandle, manager: State<'_, DownloadManager>, url: String, kind: String,
     destination: Option<String>, concurrency: Option<usize>, cookies: Option<String>,
+    format_selector: Option<String>,
 ) -> Result<DownloadView, String> {
     if url.len() > 8192 { return Err("The download URL is too long.".into()); }
     let parsed = Url::parse(&url).map_err(|_| "Enter a valid http:// or https:// URL.".to_string())?;
@@ -438,6 +735,13 @@ async fn start_download(
         "auto" | "file" | "audio" | "video" | "video-only" => kind,
         _ => "auto".to_string(),
     };
+    if let Some(selector) = format_selector.as_ref() {
+        if selector.is_empty() || selector.len() > 128
+            || !selector.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '_' | '-' ))
+        {
+            return Err("The selected media quality is invalid. Please choose a listed resolution.".into());
+        }
+    }
     let default_base = {
         #[cfg(target_os = "android")]
         { app.path().app_data_dir().ok().map(|path| path.join("download-staging")) }
@@ -466,13 +770,14 @@ async fn start_download(
         error: None, cancel: cancel.clone(), progress_override: None,
         concurrency: requested, etag: None, last_modified: None,
         cookies_file: cookies_file.clone(),
+        format_selector: format_selector.clone(),
         cancel_requested: Arc::new(AtomicBool::new(false)),
     };
     let initial = view_of(&record);
     let manager = manager.inner().clone();
     manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?.insert(id.clone(), record);
     persist_records(&manager);
-    spawn_download_task(app, manager, id, url, kind, destination_path, requested, cookies_file, cancel);
+    spawn_download_task(app, manager, id, url, kind, destination_path, requested, cookies_file, format_selector, cancel);
     Ok(initial)
 }
 
@@ -480,7 +785,7 @@ async fn start_download(
 fn resume_download(
     app: AppHandle, manager: State<'_, DownloadManager>, id: String,
 ) -> Result<DownloadView, String> {
-    let (url, kind, destination, concurrency, cookies_file, cancel, view) = {
+    let (url, kind, destination, concurrency, cookies_file, format_selector, cancel, view) = {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
         if record.status == "Completed" { return Err("This download is already complete.".into()); }
@@ -498,10 +803,10 @@ fn resume_download(
         record.progress_override = None;
         let destination = PathBuf::from(&record.destination);
         let view = view_of(record);
-        (record.url.clone(), record.kind.clone(), destination, record.concurrency, record.cookies_file.clone(), cancel, view)
+        (record.url.clone(), record.kind.clone(), destination, record.concurrency, record.cookies_file.clone(), record.format_selector.clone(), cancel, view)
     };
     persist_records(manager.inner());
-    spawn_download_task(app, manager.inner().clone(), id, url, kind, destination, concurrency, cookies_file, cancel);
+    spawn_download_task(app, manager.inner().clone(), id, url, kind, destination, concurrency, cookies_file, format_selector, cancel);
     Ok(view)
 }
 
@@ -587,7 +892,7 @@ fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
 async fn check_engines(app: AppHandle) -> Vec<ToolStatus> {
     let mut result = Vec::new();
     result.push(ToolStatus { name: "Native HTTP".into(), available: true, version: Some("Built-in".into()) });
-    for name in ["yt-dlp", "aria2c", "ffmpeg", "ffprobe"] {
+    for name in ["yt-dlp", "deno", "aria2c", "ffmpeg", "ffprobe"] {
         if let Some(path) = find_tool(&app, name) {
             let mut command = Command::new(&path);
             configure_tool_environment(&mut command, &path);
@@ -609,6 +914,7 @@ async fn check_engines(_app: AppHandle) -> Vec<ToolStatus> {
     vec![
         ToolStatus { name: "Native HTTP".into(), available: true, version: Some("Built-in".into()) },
         ToolStatus { name: "yt-dlp".into(), available: true, version: Some("Embedded Python runtime".into()) },
+        ToolStatus { name: "JavaScript runtime".into(), available: true, version: Some("Bundled QuickJS".into()) },
         ToolStatus { name: "aria2c".into(), available: false, version: None },
         ToolStatus { name: "ffmpeg".into(), available: true, version: Some("Embedded FFmpegKit".into()) },
         ToolStatus { name: "ffprobe".into(), available: true, version: Some("Embedded FFmpegKit".into()) },
@@ -629,7 +935,8 @@ async fn check_engines(_app: AppHandle) -> Vec<ToolStatus> {
 
 async fn execute_download(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
-    destination: PathBuf, concurrency: usize, cookies_file: Option<String>, cancel: CancellationToken,
+    destination: PathBuf, concurrency: usize, cookies_file: Option<String>,
+    format_selector: Option<String>, cancel: CancellationToken,
 ) -> Result<(), String> {
     let _permit = tokio::select! {
         _ = cancel.cancelled() => return Err("Cancelled".into()),
@@ -655,7 +962,7 @@ async fn execute_download(
         && (needs_media_extractor(&parsed) || looks_like_html_page(&client, &url).await);
     if media_page {
         set_status(&manager, &id, "Extracting media", None);
-        return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, cookies_file.as_deref(), &cancel).await;
+        return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, cookies_file.as_deref(), format_selector.as_deref(), &cancel).await;
     }
     let name = suggested_name(&parsed).unwrap_or_else(|| format!("download-{}", &id[..8]));
     let target = unique_path(&manager, &id, &destination, &name)?;
@@ -1051,7 +1358,8 @@ async fn download_piece(
 #[cfg(target_os = "android")]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
-    destination: &Path, concurrency: usize, cookies_file: Option<&str>, cancel: &CancellationToken,
+    destination: &Path, concurrency: usize, cookies_file: Option<&str>,
+    format_selector: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let progress_manager = manager.clone();
@@ -1069,6 +1377,7 @@ async fn run_media_download(
         kind: kind.to_string(),
         concurrency: concurrency.min(16),
         cookies_file: cookies_file.map(str::to_string),
+        format_selector: format_selector.map(str::to_string),
         on_progress,
     };
     let app_handle = app.clone();
@@ -1161,7 +1470,8 @@ fn default_save_location() -> &'static str {
 #[cfg(target_os = "ios")]
 async fn run_media_download(
     _app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, _kind: &str,
-    destination: &Path, _concurrency: usize, _cookies_file: Option<&str>, cancel: &CancellationToken,
+    destination: &Path, _concurrency: usize, _cookies_file: Option<&str>,
+    _format_selector: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     if url.path().to_ascii_lowercase().ends_with(".m3u8") {
         return download_open_hls(url, destination, id, manager, cancel).await;
@@ -1172,7 +1482,8 @@ async fn run_media_download(
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
-    destination: &Path, concurrency: usize, cookies_file: Option<&str>, cancel: &CancellationToken,
+    destination: &Path, concurrency: usize, cookies_file: Option<&str>,
+    format_selector: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
     let yt_dlp = find_tool(app, "yt-dlp").ok_or_else(||
         "yt-dlp was not found. Install yt-dlp or place it in the app's tools folder to download from media sites.".to_string())?;
@@ -1188,18 +1499,37 @@ async fn run_media_download(
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
-    match kind {
-        "audio" => { command.arg("-f").arg("bestaudio/best"); }
-        "video-only" => { command.arg("-f").arg("bestvideo"); }
-        "video" if has_ffmpeg => {
-            command.arg("-f").arg("bestvideo+bestaudio/best").arg("--merge-output-format").arg("mp4");
+    let selected_format = match format_selector {
+        Some(selector) if selector.starts_with("max-height-") => {
+            let max_height = selector.trim_start_matches("max-height-");
+            if !max_height.chars().all(|ch| ch.is_ascii_digit()) {
+                return Err("Invalid resolution selection.".into());
+            }
+            match kind {
+                "audio" => "bestaudio/best".to_string(),
+                "video-only" => format!("bestvideo[height<={max_height}]/bestvideo"),
+                _ if has_ffmpeg => format!("bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"),
+                _ => format!("best[height<={max_height}][ext=mp4]/best[height<={max_height}]"),
+            }
         }
-        "video" => { command.arg("-f").arg("best[ext=mp4]/best"); }
-        _ if has_ffmpeg => {
-            command.arg("-f").arg("bestvideo+bestaudio/best").arg("--merge-output-format").arg("mp4");
-        }
-        _ => { command.arg("-f").arg("best[ext=mp4]/best"); }
+        Some(selector) => selector.to_string(),
+        None => match kind {
+            "audio" => "bestaudio/best".to_string(),
+            "video-only" => "bestvideo".to_string(),
+            "video" if has_ffmpeg => "bestvideo+bestaudio/best".to_string(),
+            "video" => "best[ext=mp4]/best".to_string(),
+            _ if has_ffmpeg => "bestvideo+bestaudio/best".to_string(),
+            _ => "best[ext=mp4]/best".to_string(),
+        },
+    };
+    command.arg("-f").arg(selected_format);
+    if has_ffmpeg && kind != "audio" && kind != "video-only" {
+        command.arg("--merge-output-format").arg("mp4");
     }
+    if let Some(deno) = find_tool(app, "deno") {
+        command.arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
+    }
+    command.arg("--remote-components").arg("ejs:github");
     if let Some(cookie_path) = cookies_file {
         command.arg("--cookies").arg(cookie_path);
     }
@@ -1637,6 +1967,7 @@ mod lite_mode_tests {
             etag: None,
             last_modified: None,
             cookies_file: None,
+            format_selector: None,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1860,6 +2191,55 @@ mod lite_mode_tests {
         std::fs::remove_dir_all(folder).expect("remove recovery directory");
     }
 
+
+    #[test]
+    fn media_playlist_json_is_expanded_into_individual_video_entries() {
+        let json = r#"{
+            "title":"My playlist",
+            "extractor_key":"YoutubeTab",
+            "_type":"playlist",
+            "playlist_count":2,
+            "entries":[
+                {"id":"abcdefghijk","title":"First video","url":"https://www.youtube.com/watch?v=abcdefghijk","duration":85},
+                {"id":"lmnopqrstuv","title":"Second video","url":"https://www.youtube.com/watch?v=lmnopqrstuv","duration":125}
+            ]
+        }"#;
+        let parsed = super::parse_media_analysis(json, "https://www.youtube.com/playlist?list=PL123")
+            .expect("parse playlist");
+        assert!(parsed.is_playlist);
+        assert_eq!(parsed.entry_count, 2);
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[0].title, "First video");
+        assert_eq!(parsed.entries[1].url, "https://www.youtube.com/watch?v=lmnopqrstuv");
+    }
+
+    #[test]
+    fn flat_youtube_video_metadata_gets_a_downloadable_watch_url() {
+        let json = r#"{"id":"abcdefghijk","title":"Single video","extractor_key":"Youtube","duration":42}"#;
+        let parsed = super::parse_media_analysis(json, "https://youtu.be/abcdefghijk")
+            .expect("parse video metadata");
+        assert!(!parsed.is_playlist);
+        assert_eq!(parsed.entries.len(), 1);
+        assert_eq!(parsed.entries[0].url, "https://youtu.be/abcdefghijk");
+    }
+
+    #[test]
+    fn available_media_formats_include_resolution_and_audio_video_flags() {
+        let json = r#"{"formats":[
+            {"format_id":"18","ext":"mp4","height":360,"width":640,"vcodec":"avc1","acodec":"mp4a"},
+            {"format_id":"137","ext":"mp4","height":1080,"width":1920,"vcodec":"avc1","acodec":"none"},
+            {"format_id":"140","ext":"m4a","vcodec":"none","acodec":"mp4a"}
+        ]}"#;
+        let formats = super::parse_media_formats(json).expect("parse formats");
+        assert_eq!(formats.len(), 3);
+        let high_video = formats.iter().find(|item| item.format_id == "137").unwrap();
+        assert_eq!(high_video.resolution, "1080p");
+        assert!(high_video.is_video);
+        assert!(!high_video.is_audio);
+        let progressive = formats.iter().find(|item| item.format_id == "18").unwrap();
+        assert!(progressive.is_video && progressive.is_audio);
+    }
+
     #[test]
     fn byte_range_resume_reads_the_exact_start_offset() {
         let value = header::HeaderValue::from_static("bytes 4096-8191/16384");
@@ -1944,7 +2324,8 @@ pub fn run() {
     builder
         .invoke_handler(tauri::generate_handler![
             start_download, resume_download, get_downloads, pause_download, cancel_download, clear_finished,
-            check_engines, supports_folder_picker, default_save_location, reveal_download, open_download
+            check_engines, supports_folder_picker, default_save_location, reveal_download, open_download,
+            analyze_media, get_media_formats
         ])
         .run(tauri::generate_context!())
         .expect("error while running DownBest");

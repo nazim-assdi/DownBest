@@ -68,6 +68,10 @@ jobs:
           $ffExe = Get-ChildItem "$env:RUNNER_TEMP/ffmpeg" -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           if (-not $ffExe) { throw "FFmpeg executable was not found in the LGPL build." }
           Get-ChildItem $ffExe.DirectoryName -File | Copy-Item -Destination $tools
+          $denoZip = "$env:RUNNER_TEMP/deno.zip"
+          Invoke-WebRequest "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-pc-windows-msvc.zip" -OutFile $denoZip
+          Expand-Archive $denoZip "$env:RUNNER_TEMP/deno" -Force
+          Copy-Item "$env:RUNNER_TEMP/deno/deno.exe" "$tools/deno.exe"
           Get-ChildItem $tools -File | ForEach-Object { if ($_.Extension -eq ".exe") { Unblock-File $_ } }
       - name: Prepare bundled media tools (Linux)
         if: runner.os == 'Linux'
@@ -95,7 +99,12 @@ jobs:
           test -n "$ffmpeg_bin"
           cp "$ffmpeg_bin" "$tools/ffmpeg"
           if [ -n "$ffprobe_bin" ]; then cp "$ffprobe_bin" "$tools/ffprobe"; fi
-          chmod +x "$tools/ffmpeg" "$tools/ffprobe" "$tools/aria2c"
+          deno_zip="$RUNNER_TEMP/deno-linux.zip"
+          curl -fsSL "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip" -o "$deno_zip"
+          mkdir -p "$RUNNER_TEMP/deno-linux"
+          unzip -q "$deno_zip" -d "$RUNNER_TEMP/deno-linux"
+          cp "$RUNNER_TEMP/deno-linux/deno" "$tools/deno"
+          chmod +x "$tools/ffmpeg" "$tools/ffprobe" "$tools/aria2c" "$tools/deno"
       - name: Prepare bundled media tools (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -118,7 +127,12 @@ jobs:
           test -x "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe"
           cp "$RUNNER_TEMP/ffmpeg-install/bin/ffmpeg" "$tools/ffmpeg"
           cp "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe" "$tools/ffprobe"
-          chmod +x "$tools/aria2c" "$tools/ffmpeg" "$tools/ffprobe"
+          if [[ "$(uname -m)" == "arm64" ]]; then deno_target="aarch64-apple-darwin"; else deno_target="x86_64-apple-darwin"; fi
+          curl -fsSL "https://github.com/denoland/deno/releases/download/v2.9.8/deno-${deno_target}.zip" -o "$RUNNER_TEMP/deno-macos.zip"
+          mkdir -p "$RUNNER_TEMP/deno-macos"
+          unzip -q "$RUNNER_TEMP/deno-macos.zip" -d "$RUNNER_TEMP/deno-macos"
+          cp "$RUNNER_TEMP/deno-macos/deno" "$tools/deno"
+          chmod +x "$tools/aria2c" "$tools/ffmpeg" "$tools/ffprobe" "$tools/deno"
       - name: Verify bundled tools
         shell: bash
         run: |
@@ -126,6 +140,8 @@ jobs:
           test -f src-tauri/tools/yt-dlp -o -f src-tauri/tools/yt-dlp.exe
           test -f src-tauri/tools/aria2c -o -f src-tauri/tools/aria2c.exe
           test -f src-tauri/tools/ffmpeg -o -f src-tauri/tools/ffmpeg.exe
+          test -f src-tauri/tools/deno -o -f src-tauri/tools/deno.exe
+          if [[ -x src-tauri/tools/deno ]]; then src-tauri/tools/deno --version; else src-tauri/tools/deno.exe --version; fi
       - name: Install frontend dependencies
         run: npm install
       - name: Generate app icons
@@ -180,8 +196,39 @@ jobs:
               raise SystemExit("Could not locate compileSdk in generated Android app/build.gradle.kts")
           content = re.sub(r"(?m)^(\s*targetSdk\s*=\s*)\d+", r"\g<1>36", content, count=1)
           gradle.write_text(content)
-          print("Android compileSdk/targetSdk API 36; ABI filters: arm64-v8a, x86_64")
+          manifest = Path("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
+          manifest_content = manifest.read_text()
+          if "android:extractNativeLibs=" in manifest_content:
+              manifest_content = re.sub(r'android:extractNativeLibs="[^"]+"', 'android:extractNativeLibs="true"', manifest_content, count=1)
+          else:
+              manifest_content, changed = re.subn(r"(<application\b)", r'\1 android:extractNativeLibs="true"', manifest_content, count=1)
+              if not changed:
+                  raise SystemExit("Could not find the Android application manifest element")
+          manifest.write_text(manifest_content)
+          print("Android compileSdk/targetSdk API 36; native runtime extraction enabled; ABIs: arm64-v8a, x86_64")
           PY
+      - name: Prepare Android JavaScript runtime (QuickJS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          qjs_version="v0.18.0"
+          curl -fsSL "https://github.com/quickjs-ng/quickjs/archive/refs/tags/${qjs_version}.tar.gz" -o "$RUNNER_TEMP/quickjs-ng.tar.gz"
+          mkdir -p "$RUNNER_TEMP/quickjs-ng"
+          tar -xzf "$RUNNER_TEMP/quickjs-ng.tar.gz" -C "$RUNNER_TEMP/quickjs-ng" --strip-components=1
+          for abi in arm64-v8a x86_64; do
+            build="$RUNNER_TEMP/quickjs-build-$abi"
+            cmake -S "$RUNNER_TEMP/quickjs-ng" -B "$build" \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-24 -DCMAKE_BUILD_TYPE=Release \
+              -DQJS_BUILD_LIBC=ON
+            cmake --build "$build" --target qjs -j2
+            qjs_bin="$(find "$build" -type f -name qjs -perm -u+x | head -n 1)"
+            test -n "$qjs_bin"
+            mkdir -p "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi"
+            cp "$qjs_bin" "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
+            chmod 755 "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
+            file "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
+          done
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
       - name: Build APKs
