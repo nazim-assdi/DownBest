@@ -229,15 +229,10 @@ jobs:
               -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
               -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-24 -DCMAKE_BUILD_TYPE=Release \
               -DQJS_BUILD_LIBC=ON
-            # QuickJS-NG's CMake qjs target builds libqjs.a, not the interpreter.
-            # Link the upstream CLI sources against that ABI-specific library.
-            cmake --build "$build" --target qjs -j2
-            test -f "$build/libqjs.a"
-            qjs_bin="$build/downbest-qjs"
-            "$cc" -D_GNU_SOURCE -DQUICKJS_NG_BUILD -I"$source_dir" \
-              "$source_dir/qjs.c" "$source_dir/gen/repl.c" "$source_dir/gen/standalone.c" \
-              "$build/libqjs.a" -lm -ldl -pthread -o "$qjs_bin"
-            chmod 755 "$qjs_bin"
+            # qjs is the core static library; qjs_exe is the actual interpreter executable.
+            cmake --build "$build" --target qjs_exe -j2
+            qjs_bin="$build/qjs"
+            test -x "$qjs_bin"
             "$qjs_bin" -e 'print("DownBest QuickJS runtime ready")'
             mkdir -p "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi"
             cp "$qjs_bin" "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
