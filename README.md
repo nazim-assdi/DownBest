@@ -139,3 +139,8 @@ The media library now offers only **Default** and **Audio only**. Default downlo
 The iOS build currently supports direct audio file URLs, but not audio-only extraction from remote video/playlist pages. Desktop and Android builds support the Audio only mode.
 
 The general download form has no manual content-type switch: automatic routing chooses the media extractor for supported media pages and the native HTTP downloader for direct files.
+
+
+## Automatic resume
+
+DownBest automatically retries temporary connection, timeout, DNS and transient HTTP server errors using an increasing delay (3, 6, 12, 24, 45, then 60 seconds) until the source becomes reachable or the user pauses/cancels the job. HTTP partial files and yt-dlp continuation data are retained between attempts. Jobs that were active or queued when the app closed are automatically resumed on the next launch; jobs explicitly paused or cancelled by the user are not auto-started. Authentication, unavailable/private media, not-found and local disk permission errors are treated as non-retryable.

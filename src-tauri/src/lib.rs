@@ -2407,6 +2407,37 @@ mod lite_mode_tests {
     }
 
     #[test]
+    fn interrupted_jobs_auto_resume_but_user_paused_jobs_stay_paused() {
+        let folder = std::env::temp_dir().join(format!("downbest-auto-resume-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create auto-resume directory");
+        let queue_file = folder.join("queue.json");
+
+        let manager = DownloadManager::default();
+        manager.restore_queue(queue_file.clone());
+        let mut interrupted = queued_record("interrupted-job");
+        interrupted.status = "Downloading".into();
+        interrupted.destination = folder.display().to_string();
+        let mut manual_pause = queued_record("manual-pause-job");
+        manual_pause.status = "Paused".into();
+        manager.records.lock().expect("lock original queue").extend([
+            (interrupted.id.clone(), interrupted),
+            (manual_pause.id.clone(), manual_pause),
+        ]);
+        persist_records(&manager);
+
+        let reopened = DownloadManager::default();
+        let auto_resume = reopened.restore_queue(queue_file);
+        assert!(auto_resume.iter().any(|id| id == "interrupted-job"));
+        assert!(!auto_resume.iter().any(|id| id == "manual-pause-job"));
+
+        let records = reopened.records.lock().expect("lock restored queue");
+        assert_eq!(records.get("interrupted-job").unwrap().status, "Queued");
+        assert_eq!(records.get("manual-pause-job").unwrap().status, "Paused");
+        drop(records);
+        std::fs::remove_dir_all(folder).expect("remove auto-resume directory");
+    }
+
+    #[test]
     fn cancelling_a_job_removes_its_http_and_extractor_temporary_files() {
         let root = std::env::temp_dir().join(format!("downbest-cancel-cleanup-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create cancellation test folder");
