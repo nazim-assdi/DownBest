@@ -163,8 +163,10 @@ function renderDownloads() {
     const displayName = mediaTitle || d.file_name || d.url;
     const mediaHeading = '<div class="download-heading"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
       (mediaTitle ? '<span class="media-type-tag">VIDEO</span>' : '') + '</div>';
-    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" : paused ? "paused" : queued ? "queued" : "running";
+    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
+      paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
     const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
+      d.status === "Retrying" ? "Auto retrying" :
       d.status === "Connecting" ? "Connecting" :
       d.status === "Extracting media" ? "Finding media" :
       d.status === "Cancelling" ? "Cancelling" :
@@ -177,6 +179,7 @@ function renderDownloads() {
       ? formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed)
       : "";
     const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" :
+      d.status === "Retrying" ? "Retrying…" :
       queued ? "Waiting" :
       d.status === "Connecting" ? "Connecting…" :
       d.status === "Extracting media" ? "Analyzing…" :
@@ -187,6 +190,7 @@ function renderDownloads() {
       cancelled ? "This transfer was cancelled." :
       done ? "Download completed successfully." :
       queued ? "Added to queue · waiting for a download slot." :
+      d.status === "Retrying" ? safe(d.error || "Connection interrupted · retrying automatically.") :
       d.status === "Connecting" ? "Connecting securely to the source…" :
       d.status === "Extracting media" ? "Reading available media streams…" :
       d.downloaded_bytes > 0 ? "Receiving file data…" : "Preparing your transfer…";
@@ -199,7 +203,7 @@ function renderDownloads() {
     const etaLabel = etaText && !done && !paused ? etaText + " left" : "";
     const unknownLength = !d.total_bytes && pct <= 0 && !done;
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
-      (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
+      d.status === "Retrying" || (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
     const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
       d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
     const bar = done ? 100 : pct;

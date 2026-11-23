@@ -102,22 +102,27 @@ fn build_http_client() -> Client {
 }
 
 impl DownloadManager {
-    fn restore_queue(&self, path: PathBuf) {
+    fn restore_queue(&self, path: PathBuf) -> Vec<String> {
         if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
         if let Ok(mut slot) = self.persistence_file.lock() { *slot = Some(path.clone()); }
         let fallback = path.with_extension("json.tmp");
         let bytes = std::fs::read(&path).or_else(|_| std::fs::read(&fallback));
-        let Ok(bytes) = bytes else { return; };
-        let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return; };
+        let Ok(bytes) = bytes else { return Vec::new(); };
+        let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return Vec::new(); };
         let mut cancelled_ids = Vec::new();
+        let mut auto_resume_ids = Vec::new();
         if let Ok(mut records) = self.records.lock() {
             for item in items {
                 let was_cancelled = item.cancel_requested;
+                let was_interrupted = matches!(item.status.as_str(),
+                    "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying");
                 let status = if was_cancelled {
                     "Cancelled".to_string()
+                } else if was_interrupted {
+                    "Queued".to_string()
                 } else {
                     match item.status.as_str() {
-                        "Completed" | "Failed" | "Cancelled" => item.status.clone(),
+                        "Completed" | "Failed" | "Cancelled" | "Paused" => item.status.clone(),
                         _ => "Paused".to_string(),
                     }
                 };
@@ -137,6 +142,7 @@ impl DownloadManager {
                     cancel_requested: Arc::new(AtomicBool::new(was_cancelled)),
                 });
                 if was_cancelled { cancelled_ids.push(id); }
+                else if was_interrupted { auto_resume_ids.push(id); }
             }
         }
         for id in cancelled_ids {
@@ -144,6 +150,7 @@ impl DownloadManager {
             cleanup_job_cookies(self, &id);
         }
         persist_records(self);
+        auto_resume_ids
     }
 }
 
@@ -419,6 +426,37 @@ fn set_progress(manager: &DownloadManager, id: &str, progress: f64) {
 }
 
 
+fn is_retryable_download_error(error: &str) -> bool {
+    let message = error.to_ascii_lowercase();
+    let permanent = [
+        "unsupported url", "invalid url", "private video", "video unavailable",
+        "not available in your country", "sign in to confirm", "login required",
+        "authentication required", "http error 401", "http error 403",
+        "http error 404", "returned http 401", "returned http 403",
+        "returned http 404", "permission denied", "no space left on device",
+        "disk write failed", "invalid content-range",
+    ];
+    if permanent.iter().any(|part| message.contains(part)) { return false; }
+    let transient = [
+        "timed out", "timeout", "connection", "network", "dns", "temporarily",
+        "broken pipe", "connection reset", "connection closed", "failed to connect",
+        "could not connect", "error sending request", "transport error",
+        "network stream interrupted", "download stalled", "segment interrupted",
+        "server stopped supporting parallel ranges", "incomplete download",
+        "http 408", "http 425", "http 429", "http 500", "http 502",
+        "http 503", "http 504", "http error 408", "http error 425",
+        "http error 429", "http error 500", "http error 502",
+        "http error 503", "http error 504", "temporarily unavailable",
+        "remote end closed", "unexpected eof", "unexpected end of file",
+    ];
+    transient.iter().any(|part| message.contains(part))
+}
+
+fn auto_retry_delay(attempt: usize) -> std::time::Duration {
+    let seconds = [3u64, 6, 12, 24, 45, 60];
+    std::time::Duration::from_secs(seconds[attempt.saturating_sub(1).min(seconds.len() - 1)])
+}
+
 fn spawn_download_task(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
     destination: PathBuf, concurrency: usize, cookies_file: Option<String>,
@@ -438,8 +476,32 @@ fn spawn_download_task(
         });
         #[cfg(target_os = "android")]
         let publish_app = app.clone();
-        let download_result = execute_download(app, manager.clone(), id.clone(), url, kind,
-            destination, concurrency, cookies_file, format_selector, cancel.clone()).await;
+        let mut retry_attempt = 0usize;
+        let download_result = loop {
+            let attempt_result = execute_download(
+                app.clone(), manager.clone(), id.clone(), url.clone(), kind.clone(),
+                destination.clone(), concurrency, cookies_file.clone(), format_selector.clone(),
+                cancel.clone(),
+            ).await;
+            match attempt_result {
+                Ok(()) => break Ok(()),
+                Err(error) if cancel.is_cancelled() => break Err(error),
+                Err(error) if is_retryable_download_error(&error) => {
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    let delay = auto_retry_delay(retry_attempt);
+                    let message = format!(
+                        "Temporary connection problem · automatic retry #{} in {} seconds.",
+                        retry_attempt, delay.as_secs()
+                    );
+                    set_status(&manager, &id, "Retrying", Some(message));
+                    tokio::select! {
+                        _ = cancel.cancelled() => break Err("Cancelled".into()),
+                        _ = tokio::time::sleep(delay) => {}
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
         #[cfg(target_os = "android")]
         let result = if download_result.is_ok() {
             publish_completed_download(&publish_app, &manager, &id).await
@@ -880,16 +942,20 @@ async fn start_download(
     Ok(initial)
 }
 
-#[tauri::command]
-fn resume_download(
-    app: AppHandle, manager: State<'_, DownloadManager>, id: String,
+fn resume_download_inner(
+    app: AppHandle, manager: &DownloadManager, id: String, startup_recovery: bool,
 ) -> Result<DownloadView, String> {
     let (url, kind, destination, concurrency, cookies_file, format_selector, cancel, view) = {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let record = records.get_mut(&id).ok_or_else(|| "Download was not found.".to_string())?;
         if record.status == "Completed" { return Err("This download is already complete.".into()); }
-        if !matches!(record.status.as_str(), "Paused" | "Failed" | "Cancelled") {
-            return Err("Pause the running download before resuming it.".into());
+        let eligible = if startup_recovery {
+            record.status == "Queued"
+        } else {
+            matches!(record.status.as_str(), "Paused" | "Failed" | "Cancelled")
+        };
+        if !eligible {
+            return Err("This download is already queued or running.".into());
         }
         let recovered_bytes = partial_bytes_for(record);
         record.downloaded.store(recovered_bytes, Ordering::Relaxed);
@@ -904,9 +970,16 @@ fn resume_download(
         let view = view_of(record);
         (record.url.clone(), record.kind.clone(), destination, record.concurrency, record.cookies_file.clone(), record.format_selector.clone(), cancel, view)
     };
-    persist_records(manager.inner());
-    spawn_download_task(app, manager.inner().clone(), id, url, kind, destination, concurrency, cookies_file, format_selector, cancel);
+    persist_records(manager);
+    spawn_download_task(app, manager.clone(), id, url, kind, destination, concurrency, cookies_file, format_selector, cancel);
     Ok(view)
+}
+
+#[tauri::command]
+fn resume_download(
+    app: AppHandle, manager: State<'_, DownloadManager>, id: String,
+) -> Result<DownloadView, String> {
+    resume_download_inner(app, manager.inner(), id, false)
 }
 
 #[tauri::command]
@@ -2303,6 +2376,25 @@ mod lite_mode_tests {
     use uuid::Uuid;
 
     #[test]
+    fn transient_network_errors_are_retried_but_permanent_media_errors_are_not() {
+        assert!(super::is_retryable_download_error("Download request failed: error sending request for url"));
+        assert!(super::is_retryable_download_error("Network stream interrupted: connection reset by peer"));
+        assert!(super::is_retryable_download_error("yt-dlp: HTTP Error 503: Service Unavailable"));
+        assert!(super::is_retryable_download_error("Download stalled: no data was received for 90 seconds"));
+        assert!(!super::is_retryable_download_error("This video is unavailable"));
+        assert!(!super::is_retryable_download_error("Server returned HTTP 403"));
+        assert!(!super::is_retryable_download_error("Disk write failed: permission denied"));
+    }
+
+    #[test]
+    fn automatic_retry_backoff_is_capped_at_sixty_seconds() {
+        assert_eq!(super::auto_retry_delay(1).as_secs(), 3);
+        assert_eq!(super::auto_retry_delay(2).as_secs(), 6);
+        assert_eq!(super::auto_retry_delay(6).as_secs(), 60);
+        assert_eq!(super::auto_retry_delay(20).as_secs(), 60);
+    }
+
+    #[test]
     fn new_downloads_default_to_auto_and_only_allow_direct_file_override() {
         assert_eq!(super::normalize_download_kind("auto"), "auto");
         assert_eq!(super::normalize_download_kind("file"), "file");
@@ -2586,7 +2678,7 @@ mod lite_mode_tests {
         {
             let records = restarted.records.lock().expect("lock restored queue");
             let restored = records.get("resume-job").expect("restored download");
-            assert_eq!(restored.status, "Paused");
+            assert_eq!(restored.status, "Queued");
             assert_eq!(partial_bytes_for(restored), 8);
         }
 
@@ -2624,7 +2716,7 @@ mod lite_mode_tests {
         reopened.restore_queue(queue_file);
         let records = reopened.records.lock().expect("lock restored queue");
         let restored = records.get("recovery-job").expect("restored unfinished job");
-        assert_eq!(restored.status, "Paused");
+        assert_eq!(restored.status, "Queued");
         assert_eq!(partial_bytes_for(restored), 4096);
         assert_eq!(restored.downloaded.load(Ordering::Relaxed), 4096);
         drop(records);
@@ -2793,7 +2885,13 @@ pub fn run() {
         .manage(DownloadManager::default())
         .setup(|app| {
             if let Ok(directory) = app.path().app_data_dir() {
-                app.state::<DownloadManager>().restore_queue(directory.join("queue.json"));
+                let manager = app.state::<DownloadManager>();
+                let interrupted = manager.restore_queue(directory.join("queue.json"));
+                let manager = manager.inner().clone();
+                let handle = app.handle().clone();
+                for id in interrupted {
+                    let _ = resume_download_inner(handle.clone(), &manager, id, true);
+                }
             }
             Ok(())
         });
