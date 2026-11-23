@@ -191,7 +191,7 @@ function renderDownloads() {
       d.status === "Extracting media" ? "Reading available media streams…" :
       d.downloaded_bytes > 0 ? "Receiving file data…" : "Preparing your transfer…";
     let sourceHost = "";
-    try { sourceHost = new URL(d.url).hostname.replace(/^www\\./, ""); } catch { sourceHost = ""; }
+    try { sourceHost = new URL(d.url).hostname.replace(/^www\./, ""); } catch { sourceHost = ""; }
     const sourceLabel = mediaTitle ? "YOUTUBE LIBRARY" : sourceHost || "DIRECT DOWNLOAD";
     const receivedLabel = d.total_bytes
       ? bytes(d.downloaded_bytes) + " / " + bytes(d.total_bytes)

@@ -950,3 +950,8 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 @media(prefers-reduced-motion:reduce) {
   .download,.download * {animation:none!important;transition:none!important}
 }
+
+.download.done {border-color:rgba(94,197,143,.22)}
+.download.done .download-card-visual>.file-icon {
+  color:#70d8a7;background:rgba(94,197,143,.1);border-color:rgba(94,197,143,.2)
+}
