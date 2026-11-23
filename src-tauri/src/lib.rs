@@ -1819,10 +1819,13 @@ fn default_save_location() -> &'static str {
 
 #[cfg(target_os = "ios")]
 async fn run_media_download(
-    _app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, _kind: &str,
+    _app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
     destination: &Path, _concurrency: usize, _cookies_file: Option<&str>,
     _format_selector: Option<&str>, cancel: &CancellationToken,
 ) -> Result<(), String> {
+    if kind == "audio" {
+        return Err("Audio-only extraction from remote media links is not enabled in this iOS build. Direct audio file URLs still download normally.".into());
+    }
     if url.path().to_ascii_lowercase().ends_with(".m3u8") {
         return download_open_hls(url, destination, id, manager, cancel).await;
     }
@@ -1851,7 +1854,10 @@ async fn run_media_download(
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
     let selected_format = selected_media_format(kind, format_selector, has_ffmpeg)?;
     command.arg("-f").arg(selected_format);
-    if has_ffmpeg && kind != "audio" && kind != "video-only" {
+    if kind == "audio" && has_ffmpeg {
+        command.arg("--extract-audio").arg("--audio-format").arg("mp3")
+            .arg("--audio-quality").arg("0");
+    } else if has_ffmpeg && kind != "video-only" {
         command.arg("--merge-output-format").arg("mp4");
     }
     if let Some(deno) = find_tool(app, "deno") {

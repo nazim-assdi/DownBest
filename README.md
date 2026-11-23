@@ -135,3 +135,5 @@ The repository contains DownBest Lite 1.2.0, a cross-platform UI, a buffered Rus
 ### Simplified media modes and faster downloads
 
 The media library now offers only **Default** and **Audio only**. Default downloads the best available video with its audio together; Audio only selects the best available audio stream. Direct HTTP/HTTPS file links keep their original file type and use the native HTTP downloader. The media library no longer makes a second format/resolution lookup request after analysis. High throughput (8 connections) is now the default per-file speed profile; Turbo can use up to 16 connections when the host supports parallel byte ranges.
+
+The iOS build currently supports direct audio file URLs, but not audio-only extraction from remote video/playlist pages. Desktop and Android builds support the Audio only mode.
