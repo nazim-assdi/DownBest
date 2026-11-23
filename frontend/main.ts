@@ -165,31 +165,43 @@ function renderDownloads() {
       (mediaTitle ? '<span class="media-type-tag">VIDEO</span>' : '') + '</div>';
     const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" : paused ? "paused" : queued ? "queued" : "running";
     const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
-      d.status === "Connecting" ? "Preparing" :
-      d.status === "Extracting media" ? "Finding media" : d.status;
+      d.status === "Connecting" ? "Connecting" :
+      d.status === "Extracting media" ? "Finding media" :
+      d.status === "Cancelling" ? "Cancelling" :
+      d.status === "Pausing" ? "Pausing" : d.status;
     const sizeDetail = d.total_bytes
       ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
       : bytes(d.downloaded_bytes) + " downloaded";
     const measuredSpeed = liveSpeeds.get(d.id) || d.speed_bytes_sec;
-    const eta = d.total_bytes && measuredSpeed > 0
-      ? " · " + formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed) + " left"
+    const etaText = d.total_bytes && measuredSpeed > 0
+      ? formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed)
       : "";
     const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" :
-      queued ? "Waiting for a free slot" :
-      d.status === "Connecting" ? "Contacting site…" :
-      d.status === "Extracting media" ? "Finding media formats…" :
-      d.status === "Downloading" ? "Receiving data…" : "Preparing…";
+      queued ? "Waiting" :
+      d.status === "Connecting" ? "Connecting…" :
+      d.status === "Extracting media" ? "Analyzing…" :
+      d.status === "Downloading" ? "Receiving…" :
+      done ? "Complete" : paused ? "Paused" : "—";
     const detail = failedItem ? safe(d.error || "Download failed · press Resume to retry") :
-      paused ? "Paused · " + sizeDetail + " saved. Press Resume to continue." :
-      cancelled ? "Cancelled · incomplete files removed" :
-      done ? "Saved successfully" :
-      queued ? "Waiting in queue · starts automatically" :
-      d.downloaded_bytes > 0 ? sizeDetail + eta : speed;
+      paused ? "Paused · " + sizeDetail + " saved. Resume when you're ready." :
+      cancelled ? "This transfer was cancelled." :
+      done ? "Download completed successfully." :
+      queued ? "Added to queue · waiting for a download slot." :
+      d.status === "Connecting" ? "Connecting securely to the source…" :
+      d.status === "Extracting media" ? "Reading available media streams…" :
+      d.downloaded_bytes > 0 ? "Receiving file data…" : "Preparing your transfer…";
+    let sourceHost = "";
+    try { sourceHost = new URL(d.url).hostname.replace(/^www\\./, ""); } catch { sourceHost = ""; }
+    const sourceLabel = mediaTitle ? "YOUTUBE LIBRARY" : sourceHost || "DIRECT DOWNLOAD";
+    const receivedLabel = d.total_bytes
+      ? bytes(d.downloaded_bytes) + " / " + bytes(d.total_bytes)
+      : bytes(d.downloaded_bytes) + " received";
+    const etaLabel = etaText && !done && !paused ? etaText + " left" : "";
     const unknownLength = !d.total_bytes && pct <= 0 && !done;
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
       (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
     const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
-      d.status === "Downloading" ? "LIVE" : "—";
+      d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
     const bar = done ? 100 : pct;
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const output = done && d.file_path
@@ -210,7 +222,23 @@ function renderDownloads() {
           : paused || failedItem
             ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
             : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
-    return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' + mediaVisual + '<div class="download-body"><div class="download-name">' + mediaHeading + '<span class="status ' + statusClass + '">' + safe(statusLabel) + '</span></div><p>' + detail + '</p><div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div><div class="download-meta"><span>' + (mediaTitle ? "YOUTUBE / MEDIA" : done ? "100% complete" : safe(d.kind.toUpperCase())) + '</span><span>' + (done ? bytes(d.downloaded_bytes) : speed) + '</span></div>' + output + '</div>' + action + '</article>';
+    const transferMeta = '<div class="download-meta">' +
+      '<span class="download-meta-item"><small>RECEIVED</small><b>' + safe(receivedLabel) + '</b></span>' +
+      '<span class="download-meta-item speed-meta"><small>' + (done ? "RESULT" : "SPEED") + '</small><b>' + safe(done ? "Saved" : speed) + '</b></span>' +
+      (etaLabel ? '<span class="download-meta-item eta-meta"><small>TIME LEFT</small><b>' + safe(etaLabel) + '</b></span>' : '') +
+      '</div>';
+    return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' +
+      '<div class="download-card-visual">' + mediaVisual + '</div>' +
+      '<div class="download-body">' +
+        '<div class="download-card-heading"><div class="download-card-title">' + mediaHeading +
+          '<span class="download-source-label">' + safe(sourceLabel) + '</span></div>' +
+          '<span class="status ' + statusClass + '"><i></i>' + safe(statusLabel) + '</span></div>' +
+        '<p class="download-card-message">' + detail + '</p>' +
+        '<div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div>' +
+        transferMeta + output +
+      '</div>' +
+      '<div class="download-card-action">' + action + '</div>' +
+      '</article>';
   }).join("");
 }
 
