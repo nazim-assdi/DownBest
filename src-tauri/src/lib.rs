@@ -30,6 +30,7 @@ struct DownloadManager {
     records: Arc<Mutex<HashMap<String, DownloadRecord>>>,
     slots: Arc<Semaphore>,
     persistence_file: Arc<Mutex<Option<PathBuf>>>,
+    http_client: Arc<Client>,
 }
 impl Default for DownloadManager {
     fn default() -> Self {
@@ -37,6 +38,7 @@ impl Default for DownloadManager {
             records: Arc::new(Mutex::new(HashMap::new())),
             slots: Arc::new(Semaphore::new(2)),
             persistence_file: Arc::new(Mutex::new(None)),
+            http_client: Arc::new(build_http_client()),
         }
     }
 }
@@ -72,6 +74,24 @@ struct DownloadRecord {
     cookies_file: Option<String>,
     format_selector: Option<String>,
     cancel_requested: Arc<AtomicBool>,
+}
+
+fn build_http_client() -> Client {
+    Client::builder()
+        .user_agent("DownBest/1.0 (+https://github.com/nazim-assdi/DownBest)")
+        .connect_timeout(std::time::Duration::from_secs(20))
+        // Keep TLS/TCP connections warm and reusable between separate queue items.
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .default_headers({
+            let mut headers = header::HeaderMap::new();
+            headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("identity"));
+            headers
+        })
+        .build()
+        .unwrap_or_else(|_| Client::new())
 }
 
 impl DownloadManager {
@@ -759,7 +779,7 @@ async fn start_download(
         .map_err(|error| format!("Cannot create download folder {}: {error}", destination_path.display()))?;
     let id = Uuid::new_v4().simple().to_string();
     let cookies_file = write_job_cookies(&app, &id, cookies)?;
-    let requested = concurrency.unwrap_or(2).clamp(1, 8);
+    let requested = concurrency.unwrap_or(2).clamp(1, 16);
     let cancel = CancellationToken::new();
     let record = DownloadRecord {
         id: id.clone(), url: url.clone(),
@@ -946,15 +966,7 @@ async fn execute_download(
     fs::create_dir_all(&destination).await.map_err(|e| format!("Cannot create save folder: {e}"))?;
     set_status(&manager, &id, "Connecting", None);
     let parsed = Url::parse(&url).map_err(|e| format!("Invalid URL: {e}"))?;
-    let client = Client::builder().user_agent("DownBest/1.0 (+https://github.com/nazim-assdi/DownBest)")
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .pool_idle_timeout(std::time::Duration::from_secs(45)).pool_max_idle_per_host(8)
-        .default_headers({
-            let mut headers = header::HeaderMap::new();
-            headers.insert(header::ACCEPT_ENCODING, header::HeaderValue::from_static("identity"));
-            headers
-        })
-        .build().map_err(|e| format!("Could not initialize network client: {e}"))?;
+    let client = manager.http_client.as_ref().clone();
 
     // Known media domains/manifests go straight to yt-dlp. For other URLs,
     // inspect the response type so generic yt-dlp-supported web pages also work.
@@ -1211,7 +1223,7 @@ fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
     if total_bytes < MIN_PARALLEL_FILE {
         return 1;
     }
-    let requested = requested.clamp(1, 8);
+    let requested = requested.clamp(1, 16);
     requested.min(((total_bytes / TARGET_SEGMENT_BYTES).max(1)) as usize).max(1)
 }
 
@@ -1439,7 +1451,7 @@ async fn stream_to_target(
     options.create(true).write(true);
     if append { options.append(true); } else { options.truncate(true); }
     let file = options.open(&temp).await.map_err(|e| format!("Cannot open partial output file: {e}"))?;
-    let mut file = BufWriter::with_capacity(256 * 1024, file);
+    let mut file = BufWriter::with_capacity(1024 * 1024, file);
     progress.store(if append { initial_offset } else { 0 }, Ordering::Relaxed);
     let mut stream = response.bytes_stream();
     let mut since_sync = 0u64;
@@ -1488,7 +1500,7 @@ async fn stream_to_target(
         received = next_received;
         add_progress(&progress, chunk.len() as u64);
         since_sync += chunk.len() as u64;
-        if since_sync >= 4 * 1024 * 1024 {
+        if since_sync >= 32 * 1024 * 1024 {
             file.flush().await.map_err(|e| format!("Could not flush partial file: {e}"))?;
             file.get_ref().sync_data().await.map_err(|e| format!("Could not sync partial file: {e}"))?;
             since_sync = 0;
@@ -1551,7 +1563,7 @@ async fn download_segmented(
     if cancel.is_cancelled() { return Err("Cancelled".into()); }
     let temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
     let output = File::create(&temp).await.map_err(|e| format!("Cannot create output file: {e}"))?;
-    let mut output = BufWriter::with_capacity(256 * 1024, output);
+    let mut output = BufWriter::with_capacity(1024 * 1024, output);
     for part_path in parts {
         let mut part = File::open(&part_path).await.map_err(|e| format!("A download segment is missing: {e}"))?;
         tokio::io::copy(&mut part, &mut output).await.map_err(|e| format!("Could not assemble download: {e}"))?;
@@ -1592,7 +1604,7 @@ async fn download_piece(
     }
     let file = OpenOptions::new().create(true).append(true).open(&path)
         .await.map_err(|e| format!("Cannot open segment file: {e}"))?;
-    let mut file = BufWriter::with_capacity(256 * 1024, file);
+    let mut file = BufWriter::with_capacity(1024 * 1024, file);
     let mut stream = response.bytes_stream();
     let mut received = existing;
     let mut since_sync = 0u64;
@@ -1625,7 +1637,7 @@ async fn download_piece(
         }
         add_progress(&progress, chunk.len() as u64);
         since_sync += chunk.len() as u64;
-        if since_sync >= 4 * 1024 * 1024 {
+        if since_sync >= 32 * 1024 * 1024 {
             file.flush().await.map_err(|e| format!("Cannot flush segment: {e}"))?;
             file.get_ref().sync_data().await.map_err(|e| format!("Cannot sync segment: {e}"))?;
             since_sync = 0;
@@ -1829,7 +1841,7 @@ async fn run_media_download(
         // handles DASH/HLS fragments so fragment scheduling remains protocol-aware.
         command.arg("--downloader").arg("aria2c")
             .arg("--downloader").arg("dash,m3u8:native")
-            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 2M", concurrency.clamp(2, 8), concurrency.clamp(2, 8)));
+            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 4M", concurrency.clamp(2, 16), concurrency.clamp(2, 16)));
         if let Some(parent) = aria_path.parent() {
             let mut paths = vec![parent.to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
@@ -2442,7 +2454,7 @@ mod lite_mode_tests {
         }
 
         let resumed = runtime.block_on(download_http(
-            &client, &format!("http://{address}/asset.bin"), &target, &root,
+            &client, &format!("http://{address}/asset.bin"), &mut target, &root,
             "resume-job", 1, &restarted, &CancellationToken::new()
         ));
         assert!(resumed.is_ok(), "second attempt should resume successfully: {resumed:?}");
@@ -2580,6 +2592,17 @@ mod lite_mode_tests {
         assert_eq!(effective_segment_count(32 * 1024 * 1024, 4), 4);
         assert_eq!(effective_segment_count(64 * 1024 * 1024, 8), 8);
         assert_eq!(effective_segment_count(64 * 1024 * 1024, 32), 8);
+    }
+
+    #[test]
+    fn turbo_profile_can_use_sixteen_parallel_ranges_on_large_files() {
+        assert_eq!(effective_segment_count(256 * 1024 * 1024, 16), 16);
+        assert_eq!(effective_segment_count(256 * 1024 * 1024, 32), 16);
+    }
+
+    #[test]
+    fn lite_profile_stays_at_two_connections_for_large_files() {
+        assert_eq!(effective_segment_count(256 * 1024 * 1024, 2), 2);
     }
 }
 
