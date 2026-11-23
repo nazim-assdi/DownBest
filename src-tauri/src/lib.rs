@@ -742,6 +742,13 @@ async fn inspect_media_json(
     }
 }
 
+fn normalize_download_kind(kind: &str) -> &'static str {
+    match kind {
+        "file" => "file",
+        _ => "auto",
+    }
+}
+
 #[tauri::command]
 async fn start_download(
     app: AppHandle, manager: State<'_, DownloadManager>, url: String, kind: String,
@@ -751,10 +758,7 @@ async fn start_download(
     if url.len() > 8192 { return Err("The download URL is too long.".into()); }
     let parsed = Url::parse(&url).map_err(|_| "Enter a valid http:// or https:// URL.".to_string())?;
     if !matches!(parsed.scheme(), "http" | "https") { return Err("Only HTTP and HTTPS links are supported.".into()); }
-    let kind = match kind.as_str() {
-        "auto" | "file" | "audio" | "video" | "video-only" => kind,
-        _ => "auto".to_string(),
-    };
+    let kind = normalize_download_kind(&kind).to_string();
     if let Some(selector) = format_selector.as_ref() {
         if selector.is_empty() || selector.len() > 128
             || !selector.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '.' | '_' | '-' ))
@@ -2230,6 +2234,16 @@ mod lite_mode_tests {
     use uuid::Uuid;
 
     #[test]
+    fn new_downloads_default_to_auto_and_only_allow_direct_file_override() {
+        assert_eq!(super::normalize_download_kind("auto"), "auto");
+        assert_eq!(super::normalize_download_kind("file"), "file");
+        assert_eq!(super::normalize_download_kind("audio"), "auto");
+        assert_eq!(super::normalize_download_kind("video"), "auto");
+        assert_eq!(super::normalize_download_kind("video-only"), "auto");
+        assert_eq!(super::normalize_download_kind("unknown"), "auto");
+    }
+
+    #[test]
     fn common_social_video_urls_use_the_media_extractor() {
         for raw in [
             "https://www.facebook.com/watch/?v=123",
@@ -2437,7 +2451,7 @@ mod lite_mode_tests {
             .enable_all().build().expect("create async runtime");
 
         let first_attempt = runtime.block_on(download_http(
-            &client, &format!("http://{address}/asset.bin"), &mut target, &root,
+            &client, &format!("http://{address}/resume.bin"), &mut target, &root,
             "resume-job", 1, &manager, &CancellationToken::new()
         ));
         assert!(first_attempt.is_err(), "first connection should be intentionally interrupted");
@@ -2454,7 +2468,7 @@ mod lite_mode_tests {
         }
 
         let resumed = runtime.block_on(download_http(
-            &client, &format!("http://{address}/asset.bin"), &mut target, &root,
+            &client, &format!("http://{address}/resume.bin"), &mut target, &root,
             "resume-job", 1, &restarted, &CancellationToken::new()
         ));
         assert!(resumed.is_ok(), "second attempt should resume successfully: {resumed:?}");

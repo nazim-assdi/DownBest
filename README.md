@@ -17,11 +17,12 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
 - Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests. Both process output streams are drained concurrently: stderr drives live progress and stdout reports the final post-processed file path. Windows extractor processes launch without a visible console window.
 - Media Link Analyzer for YouTube/Facebook and other supported extractors: previews playlist/video entries, shows real available resolutions, FPS, format and estimated file size when reported, lets users select all or individual videos, then creates one queue item per selected video so each entry has its own progress, pause, cancel and resume controls.
+- The download form keeps Auto detect as the default. Direct file is the only manual type override; normal media downloads automatically include the best available audio and video streams.
 - Single-video quality picker: select an exact muxed video+audio format (for example, a specific 1080p MP4/FPS/size variant) or use a maximum-resolution rule to let the extractor choose and merge the best matching streams. Playlist quality uses a maximum-resolution cap per item because each entry can expose different format IDs.
 - YouTube JavaScript challenge support: desktop packages include Deno 2.9.8 and yt-dlp's EJS challenge scripts; Android packages include an ABI-matched QuickJS runtime built into the APK. Availability depends on the source and extractor; protected or unavailable formats cannot be selected.
 - Android bundles yt-dlp with an embedded Python runtime and FFmpegKit for audio-only output; it does not need a separate Python or yt-dlp install.
 - iOS includes a native open-HLS VOD downloader for unencrypted playlists, plus the direct HTTP/HTTPS downloader.
-- Audio-only, video-only and video+audio format selection for media-extractor links.
+- Media links default to automatic best video+audio selection; users can choose an available resolution or exact video+audio format in the Media Library. Manual audio-only and video-only modes are not exposed in the download form.
 - yt-dlp concurrent fragment downloads; bundled aria2c is used for HTTP/FTP transfers while its native downloader remains selected for DASH/HLS.
 - Bundled FFmpeg is used by yt-dlp to merge separate audio and video streams.
 - Desktop users can choose the save folder with the native folder picker and reveal completed files in the system file manager. The default folder is Downloads.
