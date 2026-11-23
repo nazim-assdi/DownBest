@@ -82,7 +82,8 @@ fn build_http_client() -> Client {
         .connect_timeout(std::time::Duration::from_secs(20))
         // Keep TLS/TCP connections warm and reusable between separate queue items.
         .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .pool_max_idle_per_host(16)
+        .pool_max_idle_per_host(32)
+        .http2_adaptive_window(true)
         .tcp_keepalive(std::time::Duration::from_secs(30))
         .tcp_nodelay(true)
         .default_headers({
@@ -121,7 +122,7 @@ impl DownloadManager {
                     downloaded: Arc::new(AtomicU64::new(item.downloaded_bytes)),
                     total: item.total_bytes, started: Instant::now(), error: item.error,
                     cancel: CancellationToken::new(), progress_override: None,
-                    concurrency: item.concurrency.clamp(1, 8),
+                    concurrency: item.concurrency.clamp(1, 16),
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
                     format_selector: item.format_selector,
@@ -745,7 +746,46 @@ async fn inspect_media_json(
 fn normalize_download_kind(kind: &str) -> &'static str {
     match kind {
         "file" => "file",
+        "audio" => "audio",
         _ => "auto",
+    }
+}
+
+fn selected_media_format(
+    kind: &str,
+    format_selector: Option<&str>,
+    has_ffmpeg: bool,
+) -> Result<String, String> {
+    match format_selector {
+        Some("audio") => Ok("bestaudio/best".to_string()),
+        Some(selector) if selector.starts_with("format-") => {
+            let format_id = selector.trim_start_matches("format-");
+            if format_id.is_empty() || !format_id.chars().all(|ch|
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
+            ) {
+                return Err("Invalid exact media format selection.".into());
+            }
+            Ok(format_id.to_string())
+        }
+        Some(selector) if selector.starts_with("max-height-") => {
+            let max_height = selector.trim_start_matches("max-height-");
+            if !max_height.chars().all(|ch| ch.is_ascii_digit()) || max_height.is_empty() {
+                return Err("Invalid resolution selection.".into());
+            }
+            Ok(match kind {
+                "audio" => "bestaudio/best".to_string(),
+                "video-only" => format!("bestvideo[height<={max_height}]/bestvideo"),
+                _ if has_ffmpeg => format!("bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"),
+                _ => format!("best[height<={max_height}][ext=mp4]/best[height<={max_height}]"),
+            })
+        }
+        Some(selector) => Ok(selector.to_string()),
+        None => Ok(match kind {
+            "audio" => "bestaudio/best".to_string(),
+            "video-only" => "bestvideo".to_string(),
+            _ if has_ffmpeg => "bestvideo+bestaudio/best".to_string(),
+            _ => "best[ext=mp4]/best".to_string(),
+        }),
     }
 }
 
@@ -783,7 +823,7 @@ async fn start_download(
         .map_err(|error| format!("Cannot create download folder {}: {error}", destination_path.display()))?;
     let id = Uuid::new_v4().simple().to_string();
     let cookies_file = write_job_cookies(&app, &id, cookies)?;
-    let requested = concurrency.unwrap_or(2).clamp(1, 16);
+    let requested = concurrency.unwrap_or(8).clamp(1, 16);
     let cancel = CancellationToken::new();
     let record = DownloadRecord {
         id: id.clone(), url: url.clone(),
@@ -975,7 +1015,8 @@ async fn execute_download(
     // Known media domains/manifests go straight to yt-dlp. For other URLs,
     // inspect the response type so generic yt-dlp-supported web pages also work.
     let media_page = kind != "file"
-        && (needs_media_extractor(&parsed) || looks_like_html_page(&client, &url).await);
+        && (needs_media_extractor(&parsed)
+            || (!has_known_direct_file_extension(&parsed) && looks_like_html_page(&client, &url).await));
     if media_page {
         set_status(&manager, &id, "Extracting media", None);
         return run_media_download(&app, &manager, &id, &parsed, &kind, &destination, concurrency, cookies_file.as_deref(), format_selector.as_deref(), &cancel).await;
@@ -989,8 +1030,19 @@ async fn execute_download(
     Ok(())
 }
 
+fn has_known_direct_file_extension(url: &Url) -> bool {
+    let extension = url.path().rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(extension.as_str(),
+        "aac" | "aiff" | "ape" | "avi" | "bin" | "bmp" | "csv" | "doc" | "docx" |
+        "flac" | "flv" | "gif" | "gz" | "iso" | "jpeg" | "jpg" | "m4a" | "m4v" |
+        "mkv" | "mov" | "mp3" | "mp4" | "mpeg" | "mpg" | "msi" | "ogg" | "opus" |
+        "pdf" | "png" | "ppt" | "pptx" | "rar" | "rtf" | "tar" | "tgz" | "txt" |
+        "wav" | "webm" | "webp" | "wma" | "wmv" | "xls" | "xlsx" | "zip" | "7z"
+    )
+}
+
 async fn looks_like_html_page(client: &Client, url: &str) -> bool {
-    let timeout = std::time::Duration::from_secs(8);
+    let timeout = std::time::Duration::from_secs(5);
     let head = tokio::time::timeout(timeout, client.head(url).send()).await;
     if let Ok(Ok(response)) = head {
         if response.status().is_success() {
@@ -1797,38 +1849,7 @@ async fn run_media_download(
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
-    let selected_format = match format_selector {
-        Some(selector) if selector.starts_with("format-") => {
-            let format_id = selector.trim_start_matches("format-");
-            if format_id.is_empty() || !format_id.chars().all(|ch|
-                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
-            ) {
-                return Err("Invalid exact media format selection.".into());
-            }
-            format_id.to_string()
-        }
-        Some(selector) if selector.starts_with("max-height-") => {
-            let max_height = selector.trim_start_matches("max-height-");
-            if !max_height.chars().all(|ch| ch.is_ascii_digit()) || max_height.is_empty() {
-                return Err("Invalid resolution selection.".into());
-            }
-            match kind {
-                "audio" => "bestaudio/best".to_string(),
-                "video-only" => format!("bestvideo[height<={max_height}]/bestvideo"),
-                _ if has_ffmpeg => format!("bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"),
-                _ => format!("best[height<={max_height}][ext=mp4]/best[height<={max_height}]"),
-            }
-        }
-        Some(selector) => selector.to_string(),
-        None => match kind {
-            "audio" => "bestaudio/best".to_string(),
-            "video-only" => "bestvideo".to_string(),
-            "video" if has_ffmpeg => "bestvideo+bestaudio/best".to_string(),
-            "video" => "best[ext=mp4]/best".to_string(),
-            _ if has_ffmpeg => "bestvideo+bestaudio/best".to_string(),
-            _ => "best[ext=mp4]/best".to_string(),
-        },
-    };
+    let selected_format = selected_media_format(kind, format_selector, has_ffmpeg)?;
     command.arg("-f").arg(selected_format);
     if has_ffmpeg && kind != "audio" && kind != "video-only" {
         command.arg("--merge-output-format").arg("mp4");
@@ -2237,10 +2258,26 @@ mod lite_mode_tests {
     fn new_downloads_default_to_auto_and_only_allow_direct_file_override() {
         assert_eq!(super::normalize_download_kind("auto"), "auto");
         assert_eq!(super::normalize_download_kind("file"), "file");
-        assert_eq!(super::normalize_download_kind("audio"), "auto");
+        assert_eq!(super::normalize_download_kind("audio"), "audio");
         assert_eq!(super::normalize_download_kind("video"), "auto");
         assert_eq!(super::normalize_download_kind("video-only"), "auto");
         assert_eq!(super::normalize_download_kind("unknown"), "auto");
+    }
+
+    #[test]
+    fn audio_mode_requests_audio_only_and_default_requests_best_video_with_audio() {
+        assert_eq!(
+            super::selected_media_format("audio", None, true).unwrap(),
+            "bestaudio/best"
+        );
+        assert_eq!(
+            super::selected_media_format("auto", None, true).unwrap(),
+            "bestvideo+bestaudio/best"
+        );
+        assert_eq!(
+            super::selected_media_format("auto", Some("audio"), true).unwrap(),
+            "bestaudio/best"
+        );
     }
 
     #[test]
@@ -2263,6 +2300,11 @@ mod lite_mode_tests {
     fn unrelated_download_hosts_are_not_forced_to_media_extractor() {
         let parsed = url::Url::parse("https://downloads.example.org/file.zip").unwrap();
         assert!(!needs_media_extractor(&parsed));
+        assert!(super::has_known_direct_file_extension(&parsed));
+        let audio = url::Url::parse("https://cdn.example.org/music.mp3?token=abc").unwrap();
+        assert!(super::has_known_direct_file_extension(&audio));
+        let manifest = url::Url::parse("https://cdn.example.org/stream.m3u8").unwrap();
+        assert!(!super::has_known_direct_file_extension(&manifest));
     }
 
     fn queued_record(id: &str) -> DownloadRecord {

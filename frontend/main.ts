@@ -19,7 +19,6 @@ type Download = {
 type Tool = { name: string; available: boolean; version: string | null };
 type MediaEntry = { id: string; title: string; url: string; thumbnail: string | null; duration: number | null; playlistIndex: number | null };
 type MediaAnalysis = { title: string; url: string; extractor: string; uploader: string | null; thumbnail: string | null; duration: number | null; isPlaylist: boolean; entryCount: number; entries: MediaEntry[] };
-type MediaFormat = { formatId: string; ext: string; resolution: string; width: number | null; height: number | null; fps: number | null; filesize: number | null; formatNote: string | null; vcodec: string; acodec: string; isVideo: boolean; isAudio: boolean };
 
 const root = document.querySelector<HTMLDivElement>("#app")!;
 let downloads: Download[] = [];
@@ -28,7 +27,6 @@ let filter = "all";
 let busy = false;
 let pollTimer: number | undefined;
 let mediaAnalysis: MediaAnalysis | null = null;
-let mediaFormats: MediaFormat[] = [];
 let mediaAnalyzing = false;
 const liveSamples = new Map<string, { bytes: number; at: number }>();
 const liveSpeeds = new Map<string, number>();
@@ -91,10 +89,10 @@ root.innerHTML = [
   '<section class="panel composer"><div class="section-top"><div><span class="eyebrow">BATCH DOWNLOAD</span><h2>Add one link or a whole list</h2><p>Paste multiple links, one per line. DownBest will add every link to the queue.</p></div><span class="step">01</span></div>',
   '<form id="download-form"><div class="url-label-row"><label for="urls">DOWNLOAD LINKS</label><span id="url-count">0 links detected</span></div><div class="urlbox"><span>' + icons.link + '</span><textarea id="urls" rows="3" placeholder="Paste a YouTube video, playlist, Facebook video or direct file link…" required></textarea></div><div class="media-analyze-row"><div><b>Video / Playlist Library</b><small>Inspect all videos, previews and available quality before adding them to your queue.</small></div><button id="analyze-media" type="button">Analyze link</button></div>',
   '<div class="fields"><div><label for="kind">CONTENT TYPE</label><select id="kind"><option value="auto" selected>Auto detect (default)</option><option value="file">Direct file</option></select></div>',
-  '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2" selected>Lite · Low CPU · 2 connections</option><option value="4">Balanced · 4 connections</option><option value="8">High throughput · 8 connections</option><option value="16">Turbo · Up to 16 connections</option></select></div>',
+  '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2">Lite · Low CPU · 2 connections</option><option value="4">Balanced · 4 connections</option><option value="8" selected>High throughput · 8 connections (default)</option><option value="16">Turbo · Up to 16 connections</option></select></div>',
   '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default: System Downloads"><button id="choose-folder" type="button">Browse</button></div></div></div>',
   '<div class="composer-bottom"><p class="note" id="save-location-note">Default save location: System Downloads. Resume is manual; Cancel removes incomplete files.</p><button id="start" class="primary-button" type="submit">' + icons.layers + '<b>Add to queue</b></button></div></form></section>',
-  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><div><span class="eyebrow">MEDIA LIBRARY</span><h2 id="media-title">Video collection</h2><p id="media-subtitle">Analyze a link to list its videos.</p></div><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-library-controls"><div class="media-quality"><label for="media-quality-select">VIDEO QUALITY / RESOLUTION</label><select id="media-quality-select"><option value="">Best available</option></select><small id="media-format-summary">Quality options will appear after analysis.</small></div><div class="media-select-tools"><span id="media-entry-count">0 videos</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
+  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><div><span class="eyebrow">MEDIA LIBRARY</span><h2 id="media-title">Video collection</h2><p id="media-subtitle">Analyze a link to list its videos.</p></div><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-library-controls"><div class="media-quality"><label for="media-quality-select">MEDIA DOWNLOAD MODE</label><select id="media-quality-select"><option value="">Default · best available</option><option value="audio">Audio only</option></select><small id="media-format-summary">Default downloads the best available video with audio. Choose Audio only when you only need sound.</small></div><div class="media-select-tools"><span id="media-entry-count">0 videos</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
   '<section class="engine-strip"><div class="engine-title"><span class="eyebrow">DOWNLOAD ENGINES</span><b>Ready for your links</b></div><div id="engine-list"><span class="engine-loading">Checking installed tools…</span></div></section>',
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
@@ -409,9 +407,13 @@ function updateMediaSelection() {
   const counter = document.querySelector<HTMLElement>("#media-entry-count");
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media");
   const quality = document.querySelector<HTMLSelectElement>("#media-quality-select");
-  const chosenQuality = quality?.selectedOptions[0]?.textContent || "Best available";
-  if (label) label.textContent = count + " of " + total + " selected · " + chosenQuality;
-  if (counter) counter.textContent = total + " video" + (total === 1 ? "" : "s") + " found";
+  const chosenMode = quality?.value === "audio" ? "Audio only" : "Default · best video + audio";
+  if (label) label.textContent = count + " of " + total + " selected · " + chosenMode;
+  if (counter) counter.textContent = total + " media item" + (total === 1 ? "" : "s") + " found";
+  const summary = document.querySelector<HTMLElement>("#media-format-summary");
+  if (summary) summary.textContent = quality?.value === "audio"
+    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
+    : "Default: download the best available video with audio. Direct HTTP files keep their original format.";
   if (button) {
     button.disabled = count === 0 || mediaAnalyzing;
     button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count + " selected";
@@ -431,49 +433,16 @@ function renderMediaLibrary() {
     (mediaAnalysis.entryCount > mediaAnalysis.entries.length
       ? " loaded of " + mediaAnalysis.entryCount
       : "");
-  const videoFormats = mediaFormats.filter(item => item.isVideo);
-  const heights = [...new Set(videoFormats
-    .filter(item => item.height && item.height > 0)
-    .map(item => item.height as number))].sort((a, b) => b - a);
-  const isSingleVideo = !mediaAnalysis.isPlaylist && mediaAnalysis.entries.length === 1;
-  const exactFormats = isSingleVideo
-    ? videoFormats.filter(item => item.isAudio && /^[A-Za-z0-9._-]+$/.test(item.formatId))
-    : [];
   const quality = document.querySelector<HTMLSelectElement>("#media-quality-select")!;
   const previous = quality.value;
-  const option = (value: string, label: string) =>
-    '<option value="' + safe(value) + '">' + safe(label) + '</option>';
-  const exactOptions = exactFormats.map(item => {
-    const fps = item.fps ? " · " + Math.round(item.fps) + " fps" : "";
-    const size = item.filesize ? " · " + bytes(item.filesize) : "";
-    const note = item.formatNote ? " · " + item.formatNote : "";
-    return option("format-" + item.formatId,
-      item.resolution + " · " + item.ext.toUpperCase() + fps + size + " · Video + Audio" + note);
-  }).join("");
-  const heightOptions = heights.map(height =>
-    option("max-height-" + height, height + "p or lower · best match")
-  ).join("");
-  quality.innerHTML = '<option value="">Best available</option>' +
-    (exactOptions ? '<optgroup label="Exact formats · video and audio">' + exactOptions + '</optgroup>' : "") +
-    (heightOptions ? '<optgroup label="' + (mediaAnalysis.isPlaylist ? 'Playlist resolution limit' : 'Resolution limit · adaptive format') + '">' + heightOptions + '</optgroup>' : "");
-  if ([...quality.options].some(item => item.value === previous)) quality.value = previous;
+  quality.innerHTML = '<option value="">Default · best available</option><option value="audio">Audio only</option>';
+  if (previous === "audio") quality.value = previous;
+  error.hidden = true;
+  error.textContent = "";
   const summary = document.querySelector<HTMLElement>("#media-format-summary")!;
-  const formatLabels = [...new Set(videoFormats
-    .map(item => item.resolution + " " + item.ext.toUpperCase() +
-      (item.fps ? " " + Math.round(item.fps) + "fps" : "")))].slice(0, 8);
-  if (mediaAnalysis.isPlaylist) {
-    summary.textContent = videoFormats.length
-      ? "Playlist mode: choose a maximum resolution. Each selected video will use its own best matching format up to that limit. First item formats: " + (formatLabels.join(" · ") || "not reported") + "."
-      : "Resolution details could not be loaded. The best available format will be tried for each video.";
-  } else {
-    summary.textContent = videoFormats.length
-      ? (exactFormats.length ? exactFormats.length + " exact video+audio format(s) available. " : "No single-file video+audio formats reported. ") +
-        "Choose an exact format or set a resolution limit. Available: " + (formatLabels.join(" · ") || "not reported") + "."
-      : "Format details could not be loaded. Best available will still be tried.";
-  }
-  error.hidden = videoFormats.length > 0;
-  error.textContent = videoFormats.length ? "" :
-    "No video resolution information was returned. The link may be audio-only, private, blocked or require a newer extractor.";
+  summary.textContent = quality.value === "audio"
+    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
+    : "Default: download the best available video with audio. Direct HTTP files keep their original format.";
   const list = document.querySelector<HTMLDivElement>("#media-entry-list")!;
   list.innerHTML = mediaAnalysis.entries.map((entry, index) => {
     const thumbnail = mediaImage(entry.thumbnail);
@@ -494,7 +463,6 @@ async function inspectMediaLink() {
   button.textContent = "Analyzing…";
   mediaAnalyzing = true;
   mediaAnalysis = null;
-  mediaFormats = [];
   renderMediaLibrary();
   const section = document.querySelector<HTMLElement>("#media-library")!;
   const error = document.querySelector<HTMLElement>("#media-error")!;
@@ -507,14 +475,8 @@ async function inspectMediaLink() {
       throw new Error("The link was recognized, but no downloadable video entries were returned.");
     }
     mediaAnalysis = result;
-    try {
-      mediaFormats = await invoke<MediaFormat[]>("get_media_formats", { url: result.entries[0].url });
-    } catch (formatError) {
-      mediaFormats = [];
-      error.textContent = "Video list loaded. Resolution lookup failed: " + String(formatError);
-    }
     renderMediaLibrary();
-    toast(result.entries.length + " video(s) found. Choose quality and select what to download.");
+    toast(result.entries.length + " media item(s) found. Choose Default or Audio only.");
   } catch (problem) {
     mediaAnalysis = null;
     section.hidden = false;
@@ -533,7 +495,7 @@ async function downloadSelectedMedia() {
   const indices = selectedMediaIndices();
   if (!indices.length) { toast("Select at least one video first.", true); return; }
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media")!;
-  const quality = document.querySelector<HTMLSelectElement>("#media-quality-select")!.value || null;
+  const audioOnly = document.querySelector<HTMLSelectElement>("#media-quality-select")!.value === "audio";
   button.disabled = true;
   let added = 0;
   let failed = 0;
@@ -544,11 +506,11 @@ async function downloadSelectedMedia() {
         const entry = mediaAnalysis!.entries[index];
         return invoke("start_download", {
           url: entry.url,
-          kind: "video",
+          kind: audioOnly ? "audio" : "auto",
           destination: null,
-          concurrency: 2,
+          concurrency: 8,
           cookies: null,
-          formatSelector: quality
+          formatSelector: null
         });
       }));
       added += results.filter(result => result.status === "fulfilled").length;

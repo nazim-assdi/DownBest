@@ -130,3 +130,8 @@ Android's embedded free yt-dlp runtime supports a broad extractor catalogue, but
 ## Project status
 
 The repository contains DownBest Lite 1.2.0, a cross-platform UI, a buffered Rust HTTP download core, desktop bundled media engines, Android native yt-dlp extraction, and iOS open-HLS support. Lite mode defaults to low CPU usage; Balanced and High throughput options are available. CI packaging has passed for the initial desktop builds; the latest mobile integration and bundled-tool builds are being tested. Physical Android/iOS device tests and signed iOS export are still required before claiming release readiness.
+
+
+### Simplified media modes and faster downloads
+
+The media library now offers only **Default** and **Audio only**. Default downloads the best available video with its audio together; Audio only selects the best available audio stream. Direct HTTP/HTTPS file links keep their original file type and use the native HTTP downloader. The media library no longer makes a second format/resolution lookup request after analysis. High throughput (8 connections) is now the default per-file speed profile; Turbo can use up to 16 connections when the host supports parallel byte ranges.
