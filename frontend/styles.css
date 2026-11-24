@@ -172,7 +172,10 @@ label{display:block;margin-bottom:8px;font-size:8px;letter-spacing:1.5px;font-we
 .finish-mark svg{width:15px;height:15px}
 .finish-mark.done{color:#5edcba}
 .finish-mark.failed,.finish-mark.cancelled{color:#e69aa5}
-footer{display:flex;justify-content:space-between;gap:10px;color:#586987;font-size:8px;letter-spacing:.5px;padding-top:21px}
+footer{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;color:#586987;font-size:8px;letter-spacing:.5px;padding-top:21px}
+.footer-credit{flex:0 0 100%;text-align:center;margin-top:2px;color:#83a0c9;font-size:9px;font-weight:800;letter-spacing:2.4px;text-transform:uppercase}
+:root[data-theme="eye"] .footer-credit{color:#c4d0a7}
+:root[data-theme="light"] .footer-credit{color:#688564}
 .toast{position:fixed;right:24px;bottom:24px;max-width:min(430px,calc(100vw - 48px));padding:12px 16px;border:1px solid #5cdbc444;border-radius:10px;background:#152a37;color:#b9f2e7;font-size:11px;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s;z-index:10;overflow-wrap:anywhere;box-shadow:0 14px 38px #0008}
 .toast.visible{opacity:1;transform:translateY(0)}
 .toast.error{background:#321c29;border-color:#ec829155;color:#ffbec7}
