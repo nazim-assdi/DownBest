@@ -1057,7 +1057,7 @@ async fn start_download(
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let identity = download_identity_key(&parsed);
         let duplicate_name = records.values().find(|existing| {
-            !matches!(existing.status.as_str(), "Completed" | "Failed" | "Cancelled")
+            !matches!(existing.status.as_str(), "Cancelled")
                 && Url::parse(&existing.url).map(|other| download_identity_key(&other) == identity).unwrap_or(false)
         }).map(|existing| existing.media_title.clone().unwrap_or_else(|| existing.file_name.clone()));
         if let Some(name) = duplicate_name {
@@ -2572,12 +2572,12 @@ mod lite_mode_tests {
 
     #[test]
     fn youtube_and_facebook_tracking_variants_share_one_video_identity() {
-        let youtube_a = Url::parse("https://www.youtube.com/watch?v=abc123&utm_source=share").unwrap();
-        let youtube_b = Url::parse("https://youtu.be/abc123?si=tracking").unwrap();
+        let youtube_a = url::Url::parse("https://www.youtube.com/watch?v=abc123&utm_source=share").unwrap();
+        let youtube_b = url::Url::parse("https://youtu.be/abc123?si=tracking").unwrap();
         assert_eq!(super::download_identity_key(&youtube_a), super::download_identity_key(&youtube_b));
 
-        let facebook_a = Url::parse("https://www.facebook.com/watch/?v=12345&ref=share").unwrap();
-        let facebook_b = Url::parse("https://m.facebook.com/reel/12345/").unwrap();
+        let facebook_a = url::Url::parse("https://www.facebook.com/watch/?v=12345&ref=share").unwrap();
+        let facebook_b = url::Url::parse("https://m.facebook.com/reel/12345/").unwrap();
         assert_eq!(super::download_identity_key(&facebook_a), super::download_identity_key(&facebook_b));
     }
 
