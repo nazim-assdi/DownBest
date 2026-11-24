@@ -188,7 +188,7 @@ function renderDownloads() {
     const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
       paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
     const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
-      d.status === "Extracting media" ? (d.media_activity || "Fetching video info") :
+      d.status === "Extracting media" ? (mediaTitle ? "Preparing video" : (d.media_activity || "Preparing download")) :
       d.status === "Retrying" ? "Auto retrying" :
       d.status === "Connecting" ? "Connecting" :
       d.status === "Cancelling" ? "Cancelling" :
@@ -196,7 +196,7 @@ function renderDownloads() {
     const sizeDetail = d.total_bytes
       ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
       : bytes(d.downloaded_bytes) + " downloaded";
-    const measuredSpeed = liveSpeeds.get(d.id) || d.speed_bytes_sec;
+    const measuredSpeed = d.speed_bytes_sec || liveSpeeds.get(d.id) || 0;
     const etaText = d.total_bytes && measuredSpeed > 0
       ? formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed)
       : "";
@@ -204,7 +204,7 @@ function renderDownloads() {
       d.status === "Retrying" ? "Retrying…" :
       queued ? "Waiting" :
       d.status === "Connecting" ? "Connecting…" :
-      d.status === "Extracting media" ? (d.media_activity || "Fetching details…") :
+      d.status === "Extracting media" ? (mediaTitle ? "Preparing video…" : (d.media_activity || "Preparing download…")) :
       d.status === "Downloading" ? "Receiving…" :
       done ? "Complete" : paused ? "Paused" : "—";
     const detail = failedItem ? safe(d.error || "Download failed · press Retry to try again") :
@@ -214,7 +214,7 @@ function renderDownloads() {
       queued ? "Added to queue · waiting for a download slot." :
       d.status === "Retrying" ? safe(d.error || "Connection interrupted · retrying automatically.") :
       d.status === "Connecting" ? "Connecting securely to the source…" :
-      d.status === "Extracting media" ? (d.media_activity || "Contacting the video source and fetching its file information…") :
+      d.status === "Extracting media" ? (mediaTitle ? "Preparing the selected video stream for download…" : (d.media_activity || "Preparing your transfer…")) :
       d.downloaded_bytes > 0 ? "Receiving " + sizeDetail + " · estimating remaining time…" : "Preparing your transfer…";
     let sourceHost = "";
     try { sourceHost = new URL(d.url).hostname.replace(/^www\./, ""); } catch { sourceHost = ""; }
@@ -229,7 +229,7 @@ function renderDownloads() {
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
       d.status === "Retrying" || (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
     const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
-      d.status === "Extracting media" ? "FETCHING" : d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
+      d.status === "Extracting media" ? (mediaTitle ? "PREPARING" : "FETCHING") : d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
     const bar = done ? 100 : pct;
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const output = done && d.file_path
@@ -308,6 +308,7 @@ async function refreshDownloads() {
     updateLiveSpeedSamples(next);
     downloads = next;
     renderDownloads();
+    if (mediaAnalysis) updateMediaSelection();
   } catch (error) {
     document.querySelector("#engine-state")!.textContent = "Connection issue";
     document.querySelector("#engine-dot")!.className = "offline";
@@ -411,6 +412,38 @@ function normalizedLink(raw: string): string {
   } catch {
     return raw.trim();
   }
+}
+function mediaIdentityKey(raw: string): string {
+  try {
+    const parsed = new URL(raw.trim());
+    const host = parsed.hostname.toLowerCase().replace(/^(www\\.|m\\.)/, "");
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (host === "youtu.be" && segments[0]) return "youtube:" + segments[0];
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtube-nocookie.com") {
+      const videoId = parsed.searchParams.get("v");
+      if (videoId) return "youtube:" + videoId;
+      const marker = segments.findIndex(part => ["shorts", "live", "embed", "v"].includes(part));
+      if (marker >= 0 && segments[marker + 1]) return "youtube:" + segments[marker + 1];
+    }
+    if (host === "fb.watch" || host.endsWith(".fb.watch") || host === "facebook.watch") {
+      if (segments[0]) return "facebook:" + segments[0];
+    }
+    if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.com" || host.endsWith(".fb.com")) {
+      const videoId = parsed.searchParams.get("v");
+      if (videoId) return "facebook:" + videoId;
+      const storyId = parsed.searchParams.get("story_fbid");
+      if (storyId) return "facebook-story:" + (parsed.searchParams.get("id") || "") + ":" + storyId;
+      const marker = segments.findIndex(part => ["reel", "reels", "video", "v"].includes(part));
+      if (marker >= 0 && segments[marker + 1]) return "facebook:" + segments[marker + 1];
+    }
+    return normalizedLink(raw);
+  } catch {
+    return raw.trim();
+  }
+}
+function findExistingMediaDownload(entry: MediaEntry): Download | undefined {
+  const identity = mediaIdentityKey(entry.url);
+  return downloads.find(item => item.status !== "Cancelled" && mediaIdentityKey(item.url) === identity);
 }
 function isDirectFileUrl(raw: string): boolean {
   try {
@@ -650,10 +683,24 @@ function mediaImage(url: string | null): string {
 }
 function selectedMediaIndices(): number[] {
   return Array.from(document.querySelectorAll<HTMLInputElement>("[data-media-index]:checked"))
+    .filter(input => !input.disabled)
     .map(input => Number(input.dataset.mediaIndex))
     .filter(index => Number.isInteger(index) && index >= 0 && !!mediaAnalysis?.entries[index]);
 }
 function updateMediaSelection() {
+  document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => {
+    const index = Number(input.dataset.mediaIndex);
+    const entry = Number.isInteger(index) ? mediaAnalysis?.entries[index] : undefined;
+    const existing = entry ? findExistingMediaDownload(entry) : undefined;
+    input.disabled = !!existing;
+    if (existing) input.checked = false;
+    const row = input.closest<HTMLElement>(".media-entry");
+    if (row) row.classList.toggle("already-downloaded", !!existing);
+    const state = row?.querySelector<HTMLElement>(".media-entry-state");
+    if (state) state.textContent = existing
+      ? (existing.status === "Completed" ? "Already downloaded" : "Already in queue")
+      : "";
+  });
   const count = selectedMediaIndices().length;
   const total = mediaAnalysis?.entries.length || 0;
   const label = document.querySelector<HTMLElement>("#media-selection-summary");
@@ -715,11 +762,17 @@ function renderMediaLibrary() {
   list.innerHTML = mediaAnalysis.entries.map((entry, index) => {
     const thumbnail = mediaImage(entry.thumbnail);
     const indexLabel = entry.playlistIndex ?? index + 1;
-    const checked = index === 0 ? " checked" : "";
-    return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + '><span class="media-entry-thumb">' +
+    const existing = findExistingMediaDownload(entry);
+    const checked = index === 0 && !existing ? " checked" : "";
+    const disabled = existing ? " disabled" : "";
+    const state = existing
+      ? (existing.status === "Completed" ? "Already downloaded" : "Already in queue")
+      : "";
+    return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-entry-thumb">' +
       (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
       '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' +
-      safe(entry.title) + '</b><small>' + safe(mediaDuration(entry.duration)) + ' · ' + safe(entry.id) + '</small></span></label>';
+      safe(entry.title) + '</b><small>' + safe(mediaDuration(entry.duration)) + ' · ' + safe(entry.id) +
+      '</small><small class="media-entry-state">' + state + '</small></span></label>';
   }).join("");
   updateMediaSelection();
 }
