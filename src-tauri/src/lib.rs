@@ -524,6 +524,21 @@ fn auto_retry_delay(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_secs(seconds[attempt.saturating_sub(1).min(seconds.len() - 1)])
 }
 
+fn terminal_status_after_download_error(
+    error: &str,
+    transfer_was_cancelled: bool,
+    user_requested_cancel: bool,
+    user_requested_pause: bool,
+) -> &'static str {
+    if user_requested_cancel {
+        "Cancelled"
+    } else if user_requested_pause || transfer_was_cancelled || error == "Cancelled" {
+        "Paused"
+    } else {
+        "Failed"
+    }
+}
+
 fn spawn_download_task(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
     destination: PathBuf, concurrency: usize, cookies_file: Option<String>,
@@ -577,6 +592,15 @@ fn spawn_download_task(
         };
         #[cfg(not(target_os = "android"))]
         let result = download_result;
+        // Capture the user's stop intent BEFORE cancelling the token to stop the
+        // periodic persistence task. Cancelling it unconditionally here must not
+        // turn a real extraction/finalization error into a misleading Paused state.
+        let stop_snapshot = manager.records.lock().ok()
+            .and_then(|records| records.get(&id).map(|record| (
+                record.cancel.is_cancelled(),
+                record.cancel_requested.load(Ordering::Relaxed),
+                record.status == "Pausing",
+            )));
         cancel.cancel();
         let _ = saver.await;
         match result {
@@ -585,20 +609,21 @@ fn spawn_download_task(
                 cleanup_job_cookies(&manager, &id);
             },
             Err(error) => {
-                let stop_requested = manager.records.lock().ok()
-                    .and_then(|records| records.get(&id).map(|record| (
-                        record.cancel.is_cancelled(),
-                        record.cancel_requested.load(Ordering::Relaxed),
-                    )))
-                    .unwrap_or((error == "Cancelled", false));
-                if stop_requested.1 {
-                    cleanup_cancelled_files(&manager, &id);
-                    set_status(&manager, &id, "Cancelled", None);
-                    cleanup_job_cookies(&manager, &id);
-                } else if stop_requested.0 || error == "Cancelled" {
-                    set_status(&manager, &id, "Paused", None);
-                } else {
-                    set_status(&manager, &id, "Failed", Some(error));
+                let (transfer_was_cancelled, user_requested_cancel, user_requested_pause) =
+                    stop_snapshot.unwrap_or((error == "Cancelled", false, false));
+                match terminal_status_after_download_error(
+                    &error,
+                    transfer_was_cancelled,
+                    user_requested_cancel,
+                    user_requested_pause,
+                ) {
+                    "Cancelled" => {
+                        cleanup_cancelled_files(&manager, &id);
+                        set_status(&manager, &id, "Cancelled", None);
+                        cleanup_job_cookies(&manager, &id);
+                    }
+                    "Paused" => set_status(&manager, &id, "Paused", None),
+                    _ => set_status(&manager, &id, "Failed", Some(error)),
                 }
             },
         }
@@ -2092,6 +2117,27 @@ async fn run_media_download(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn find_completed_media_output(destination: &Path, id: &str) -> Option<PathBuf> {
+    let prefix = id.chars().take(8).collect::<String>();
+    let marker = format!(" - {prefix}.");
+    std::fs::read_dir(destination).ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false; };
+            let lower = name.to_ascii_lowercase();
+            name.contains(&marker)
+                && !lower.ends_with(".part")
+                && !lower.contains(".part-frag")
+                && !lower.ends_with(".ytdl")
+                && !lower.ends_with(".tmp")
+                && !lower.ends_with(".temp")
+        })
+        .max_by_key(|path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
     destination: &Path, concurrency: usize, cookies_file: Option<&str>,
@@ -2205,12 +2251,18 @@ async fn run_media_download(
     let _ = stdout_task.await;
     let stderr_text = stderr_task.await.unwrap_or_default();
     if status.success() {
-        let output = manager.records.lock().ok()
-            .and_then(|records| records.get(id).and_then(|record| record.file_path.clone()));
+        let recorded = manager.records.lock().ok()
+            .and_then(|records| records.get(id).and_then(|record| record.file_path.clone()))
+            .filter(|path| Path::new(path).is_file());
+        let output = recorded.map(PathBuf::from)
+            .or_else(|| find_completed_media_output(destination, id));
         match output {
-            Some(path) if Path::new(&path).is_file() => Ok(()),
-            Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {path}")),
-            None => Err("yt-dlp finished but did not report the resulting file path. Check the selected save folder.".into()),
+            Some(path) if path.is_file() => {
+                set_file_path(manager, id, &path);
+                Ok(())
+            }
+            Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {}", path.display())),
+            None => Err("yt-dlp finished successfully but no final output file could be verified in the selected save folder.".into()),
         }
     } else {
         let tail: String = stderr_text.chars().rev().take(900).collect::<String>().chars().rev().collect();
@@ -2539,6 +2591,22 @@ mod lite_mode_tests {
         assert!(!super::is_retryable_download_error("This video is unavailable"));
         assert!(!super::is_retryable_download_error("Server returned HTTP 403"));
         assert!(!super::is_retryable_download_error("Disk write failed: permission denied"));
+    }
+
+    #[test]
+    fn a_real_download_error_is_failed_not_misreported_as_paused() {
+        assert_eq!(
+            super::terminal_status_after_download_error("yt-dlp finished but output file path was missing", false, false, false),
+            "Failed"
+        );
+        assert_eq!(
+            super::terminal_status_after_download_error("Cancelled", true, false, true),
+            "Paused"
+        );
+        assert_eq!(
+            super::terminal_status_after_download_error("Cancelled", true, true, false),
+            "Cancelled"
+        );
     }
 
     #[test]
