@@ -1146,14 +1146,21 @@ async fn start_download(
     {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let identity = download_identity_key(&parsed);
-        let duplicate_name = records.values().find(|existing| {
+        let duplicate = records.values().find(|existing| {
             !matches!(existing.status.as_str(), "Cancelled")
                 && Url::parse(&existing.url).map(|other| download_identity_key(&other) == identity).unwrap_or(false)
-        }).map(|existing| existing.media_title.clone().unwrap_or_else(|| existing.file_name.clone()));
-        if let Some(name) = duplicate_name {
+        }).map(|existing| (
+            existing.media_title.clone().unwrap_or_else(|| existing.file_name.clone()),
+            existing.status == "Completed",
+        ));
+        if let Some((name, already_completed)) = duplicate {
             drop(records);
             if let Some(path) = cookies_file.as_deref() { let _ = std::fs::remove_file(path); }
-            return Err(format!("Already in the queue: {name}. Resume or manage the existing queue item instead of adding it again."));
+            return Err(if already_completed {
+                format!("Already completed: {name}. This video is already saved and cannot be downloaded or resumed again.")
+            } else {
+                format!("Already in the queue: {name}. Resume or manage the existing queue item instead of adding it again.")
+            });
         }
         records.insert(id.clone(), record);
     }
@@ -2881,6 +2888,38 @@ mod lite_mode_tests {
         assert_eq!(records.get("manual-pause-job").unwrap().status, "Paused");
         drop(records);
         std::fs::remove_dir_all(folder).expect("remove auto-resume directory");
+    }
+
+    #[test]
+    fn interrupted_media_with_a_final_output_is_restored_as_completed_not_resumed() {
+        let folder = std::env::temp_dir().join(format!("downbest-final-restore-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create final output recovery folder");
+        let queue_file = folder.join("queue.json");
+        let id = "abcdef1234567890";
+        let final_file = folder.join("Finished clip [video123] - abcdef12.mp4");
+        std::fs::write(&final_file, b"complete video bytes").expect("write final output");
+
+        let original = DownloadManager::default();
+        original.restore_queue(queue_file.clone());
+        let mut interrupted = queued_record(id);
+        interrupted.url = "https://www.youtube.com/watch?v=video123".into();
+        interrupted.status = "Downloading".into();
+        interrupted.destination = folder.display().to_string();
+        original.records.lock().expect("lock original queue")
+            .insert(id.to_string(), interrupted);
+        persist_records(&original);
+
+        let reopened = DownloadManager::default();
+        let auto_resume = reopened.restore_queue(queue_file);
+        assert!(auto_resume.is_empty(), "a final output must never be auto-resumed");
+        let records = reopened.records.lock().expect("lock restored queue");
+        let restored = records.get(id).expect("restored completed media item");
+        assert_eq!(restored.status, "Completed");
+        assert_eq!(restored.file_path.as_deref(), Some(final_file.to_string_lossy().as_ref()));
+        assert_eq!(restored.downloaded.load(Ordering::Relaxed), b"complete video bytes".len() as u64);
+        assert_eq!(restored.progress_override, Some(100.0));
+        drop(records);
+        std::fs::remove_dir_all(folder).expect("remove final output recovery folder");
     }
 
     #[test]
