@@ -416,7 +416,7 @@ function normalizedLink(raw: string): string {
 function mediaIdentityKey(raw: string): string {
   try {
     const parsed = new URL(raw.trim());
-    const host = parsed.hostname.toLowerCase().replace(/^(www\\.|m\\.)/, "");
+    const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, "");
     const segments = parsed.pathname.split("/").filter(Boolean);
     if (host === "youtu.be" && segments[0]) return "youtube:" + segments[0];
     if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtube-nocookie.com") {
