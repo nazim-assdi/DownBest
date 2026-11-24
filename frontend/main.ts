@@ -17,6 +17,7 @@ type Download = {
   error: string | null;
   media_title: string | null;
   media_thumbnail: string | null;
+  media_activity: string | null;
 };
 type Tool = { name: string; available: boolean; version: string | null };
 type MediaEntry = { id: string; title: string; url: string; thumbnail: string | null; duration: number | null; playlistIndex: number | null };
@@ -113,6 +114,21 @@ function renderTools(tools: Tool[]) {
   document.querySelector("#engine-state")!.textContent = ready ? "Engine ready" : "Checking engine";
   document.querySelector("#engine-dot")!.className = ready ? "online" : "offline";
 }
+function mediaSourceLabel(raw: string): string {
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^www\./, "").replace(/^m\./, "");
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtu.be") return "YOUTUBE VIDEO";
+    if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.watch" || host.endsWith(".fb.watch")) return "FACEBOOK VIDEO";
+    if (["tiktok.com", "instagram.com", "vimeo.com", "dailymotion.com", "twitch.tv"].some(domain => host === domain || host.endsWith("." + domain))) return "MEDIA VIDEO";
+  } catch { /* malformed URLs are rendered as ordinary files */ }
+  return "";
+}
+function isApplicationOrDocumentDownload(download: Download): boolean {
+  const candidates = [download.file_name, download.file_path || ""];
+  try { candidates.push(new URL(download.url).pathname); } catch { candidates.push(download.url); }
+  return /\.(?:apk|aab|exe|msi|msix|appx|dmg|pkg|deb|rpm|appimage|zip|7z|rar|iso|pdf|docx?|xlsx?|pptx?|csv|txt|tar|gz)(?:$|[?#])/i.test(candidates.join(" "));
+}
+
 function renderDownloads() {
   const list = document.querySelector<HTMLDivElement>("#download-list")!;
   const active = downloads.filter(d => !finalStatus(d.status));
@@ -156,7 +172,8 @@ function renderDownloads() {
     const cancelled = d.status === "Cancelled";
     const paused = d.status === "Paused";
     const queued = d.status === "Queued";
-    const mediaTitle = d.media_title?.trim() || "";
+    const isMediaItem = !!mediaSourceLabel(d.url) && !isApplicationOrDocumentDownload(d);
+    const mediaTitle = isMediaItem ? (d.media_title?.trim() || "") : "";
     const mediaVisual = mediaTitle
       ? '<div class="download-media-thumb">' + (mediaImage(d.media_thumbnail) || '<span class="download-media-placeholder">▶</span>') + '<span class="download-media-play">▶</span></div>'
       : '<div class="file-icon">' + (done ? icons.check : icons.file) + '</div>';
@@ -166,6 +183,7 @@ function renderDownloads() {
     const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
       paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
     const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
+      d.status === "Extracting media" ? (d.media_activity || "Fetching video info") :
       d.status === "Retrying" ? "Auto retrying" :
       d.status === "Connecting" ? "Connecting" :
       d.status === "Extracting media" ? "Finding media" :
@@ -182,7 +200,7 @@ function renderDownloads() {
       d.status === "Retrying" ? "Retrying…" :
       queued ? "Waiting" :
       d.status === "Connecting" ? "Connecting…" :
-      d.status === "Extracting media" ? "Analyzing…" :
+      d.status === "Extracting media" ? (d.media_activity || "Fetching details…") :
       d.status === "Downloading" ? "Receiving…" :
       done ? "Complete" : paused ? "Paused" : "—";
     const detail = failedItem ? safe(d.error || "Download failed · press Resume to retry") :
@@ -192,11 +210,11 @@ function renderDownloads() {
       queued ? "Added to queue · waiting for a download slot." :
       d.status === "Retrying" ? safe(d.error || "Connection interrupted · retrying automatically.") :
       d.status === "Connecting" ? "Connecting securely to the source…" :
-      d.status === "Extracting media" ? "Reading available media streams…" :
+      d.status === "Extracting media" ? (d.media_activity || "Contacting the video source and fetching its file information…") :
       d.downloaded_bytes > 0 ? "Receiving file data…" : "Preparing your transfer…";
     let sourceHost = "";
     try { sourceHost = new URL(d.url).hostname.replace(/^www\./, ""); } catch { sourceHost = ""; }
-    const sourceLabel = mediaTitle ? "YOUTUBE LIBRARY" : sourceHost || "DIRECT DOWNLOAD";
+    const sourceLabel = mediaTitle ? (mediaSourceLabel(d.url) || "MEDIA VIDEO") : sourceHost || "DIRECT DOWNLOAD";
     const receivedLabel = d.total_bytes
       ? bytes(d.downloaded_bytes) + " / " + bytes(d.total_bytes)
       : bytes(d.downloaded_bytes) + " received";
@@ -205,7 +223,7 @@ function renderDownloads() {
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
       d.status === "Retrying" || (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
     const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
-      d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
+      d.status === "Extracting media" ? "FETCHING" : d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
     const bar = done ? 100 : pct;
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const output = done && d.file_path
@@ -454,7 +472,7 @@ function updateMediaSelection() {
   const summary = document.querySelector<HTMLElement>("#media-format-summary");
   if (summary) summary.textContent = quality?.value === "audio"
     ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
-    : "Default: download the best available video with audio. Direct HTTP files keep their original format.";
+    : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
   if (button) {
     button.disabled = count === 0 || mediaAnalyzing;
     button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count + " selected";
@@ -482,13 +500,14 @@ function renderMediaLibrary() {
   error.textContent = "";
   const summary = document.querySelector<HTMLElement>("#media-format-summary")!;
   summary.textContent = quality.value === "audio"
-    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
-    : "Default: download the best available video with audio. Direct HTTP files keep their original format.";
+    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded. Only the first item is selected initially."
+    : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
   const list = document.querySelector<HTMLDivElement>("#media-entry-list")!;
   list.innerHTML = mediaAnalysis.entries.map((entry, index) => {
     const thumbnail = mediaImage(entry.thumbnail);
     const indexLabel = entry.playlistIndex ?? index + 1;
-    return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '" checked><span class="media-entry-thumb">' +
+    const checked = index === 0 ? " checked" : "";
+    return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + '><span class="media-entry-thumb">' +
       (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
       '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' +
       safe(entry.title) + '</b><small>' + safe(mediaDuration(entry.duration)) + ' · ' + safe(entry.id) + '</small></span></label>';
