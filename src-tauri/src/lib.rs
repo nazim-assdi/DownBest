@@ -2,7 +2,7 @@ use futures_util::{future::try_join_all, StreamExt};
 use reqwest::{header, Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex},
     time::Instant,
@@ -79,6 +79,7 @@ struct DownloadRecord {
     format_selector: Option<String>,
     media_title: Option<String>,
     media_thumbnail: Option<String>,
+    media_activity: Option<String>,
     cancel_requested: Arc<AtomicBool>,
 }
 
@@ -108,7 +109,16 @@ impl DownloadManager {
         let fallback = path.with_extension("json.tmp");
         let bytes = std::fs::read(&path).or_else(|_| std::fs::read(&fallback));
         let Ok(bytes) = bytes else { return Vec::new(); };
-        let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return Vec::new(); };
+        let Ok(mut items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return Vec::new(); };
+        // Prefer completed output when resolving legacy duplicate queue entries, then paused/failed
+        // jobs, then interrupted jobs. HashMap persistence order is otherwise nondeterministic.
+        items.sort_by_key(|item| match item.status.as_str() {
+            "Completed" => 0,
+            "Paused" | "Failed" => 1,
+            "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying" => 2,
+            _ => 3,
+        });
+        let mut seen_media = HashSet::new();
         let mut cancelled_ids = Vec::new();
         let mut auto_resume_ids = Vec::new();
         if let Ok(mut records) = self.records.lock() {
@@ -116,7 +126,19 @@ impl DownloadManager {
                 let was_cancelled = item.cancel_requested;
                 let was_interrupted = matches!(item.status.as_str(),
                     "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying");
-                let status = if was_cancelled {
+                let identity = Url::parse(&item.url).ok().map(|url| download_identity_key(&url));
+                let duplicate_interrupted_job = if was_cancelled {
+                    false
+                } else if item.status == "Completed" {
+                    if let Some(key) = identity { seen_media.insert(key); }
+                    false
+                } else if let Some(key) = identity {
+                    !seen_media.insert(key)
+                } else {
+                    false
+                };
+                let should_cancel = was_cancelled || duplicate_interrupted_job;
+                let status = if should_cancel {
                     "Cancelled".to_string()
                 } else if was_interrupted {
                     "Queued".to_string()
@@ -139,9 +161,10 @@ impl DownloadManager {
                     format_selector: item.format_selector,
                     media_title: item.media_title,
                     media_thumbnail: item.media_thumbnail,
-                    cancel_requested: Arc::new(AtomicBool::new(was_cancelled)),
+                    media_activity: None,
+                    cancel_requested: Arc::new(AtomicBool::new(should_cancel)),
                 });
-                if was_cancelled { cancelled_ids.push(id); }
+                if should_cancel { cancelled_ids.push(id); }
                 else if was_interrupted { auto_resume_ids.push(id); }
             }
         }
@@ -296,7 +319,7 @@ struct DownloadView {
     id: String, url: String, file_name: String, kind: String, status: String,
     destination: String, file_path: Option<String>, downloaded_bytes: u64, total_bytes: Option<u64>,
     speed_bytes_sec: u64, progress: f64, error: Option<String>,
-    media_title: Option<String>, media_thumbnail: Option<String>,
+    media_title: Option<String>, media_thumbnail: Option<String>, media_activity: Option<String>,
 }
 #[derive(Serialize)]
 struct ToolStatus { name: String, available: bool, version: Option<String> }
@@ -317,6 +340,7 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
         progress, error: record.error.clone(),
         media_title: record.media_title.clone(),
         media_thumbnail: record.media_thumbnail.clone(),
+        media_activity: record.media_activity.clone(),
     }
 }
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
@@ -328,6 +352,13 @@ fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<S
             if status == "Completed" { record.progress_override = Some(100.0); }
             record.status = status.to_string();
             record.error = error;
+            if status == "Extracting media" {
+                record.media_activity = Some("Fetching video information".to_string());
+            } else if status == "Downloading" {
+                record.media_activity = Some("Downloading media".to_string());
+            } else if matches!(status, "Completed" | "Paused" | "Failed" | "Cancelled") {
+                record.media_activity = None;
+            }
         }
     }
     persist_records(manager);
@@ -352,6 +383,39 @@ fn set_media_title(manager: &DownloadManager, id: &str, title: &str) {
         }
     }
 }
+fn media_activity_from_line(line: &str) -> Option<&'static str> {
+    let message = line.to_ascii_lowercase();
+    if message.contains("merging formats") || message.contains("merging video") {
+        Some("Merging audio and video")
+    } else if message.contains("post-process") || message.contains("postprocessing") || message.contains("fixing") {
+        Some("Finalizing video file")
+    } else if message.contains("downloading webpage")
+        || message.contains("downloading api json")
+        || message.contains("downloading player")
+        || message.contains("extracting url")
+        || message.contains("extracting video")
+        || message.contains("fetching")
+        || message.contains("downloading m3u8 information")
+        || message.contains("downloading mpd manifest")
+    {
+        Some("Fetching video information")
+    } else if message.contains("[download]") || message.contains("destination:") || message.contains("downloading video") {
+        Some("Downloading media")
+    } else {
+        None
+    }
+}
+
+fn set_media_activity_from_line(manager: &DownloadManager, id: &str, line: &str) {
+    if let Some(activity) = media_activity_from_line(line) {
+        if let Ok(mut records) = manager.records.lock() {
+            if let Some(record) = records.get_mut(id) {
+                record.media_activity = Some(activity.to_string());
+            }
+        }
+    }
+}
+
 fn set_file_path(manager: &DownloadManager, id: &str, path: &Path) {
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
@@ -373,6 +437,9 @@ fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &
                 record.total = Some(total);
             }
             record.progress_override = Some(progress.progress.clamp(0.0, 100.0));
+            if let Some(activity) = media_activity_from_line(&progress.line) {
+                record.media_activity = Some(activity.to_string());
+            }
             if progress.downloaded_bytes > 0 && record.status != "Downloading" {
                 record.started = Instant::now();
                 record.status = "Downloading".into();
@@ -457,6 +524,21 @@ fn auto_retry_delay(attempt: usize) -> std::time::Duration {
     std::time::Duration::from_secs(seconds[attempt.saturating_sub(1).min(seconds.len() - 1)])
 }
 
+fn terminal_status_after_download_error(
+    error: &str,
+    transfer_was_cancelled: bool,
+    user_requested_cancel: bool,
+    user_requested_pause: bool,
+) -> &'static str {
+    if user_requested_cancel {
+        "Cancelled"
+    } else if user_requested_pause || transfer_was_cancelled || error == "Cancelled" {
+        "Paused"
+    } else {
+        "Failed"
+    }
+}
+
 fn spawn_download_task(
     app: AppHandle, manager: DownloadManager, id: String, url: String, kind: String,
     destination: PathBuf, concurrency: usize, cookies_file: Option<String>,
@@ -510,6 +592,15 @@ fn spawn_download_task(
         };
         #[cfg(not(target_os = "android"))]
         let result = download_result;
+        // Capture the user's stop intent BEFORE cancelling the token to stop the
+        // periodic persistence task. Cancelling it unconditionally here must not
+        // turn a real extraction/finalization error into a misleading Paused state.
+        let stop_snapshot = manager.records.lock().ok()
+            .and_then(|records| records.get(&id).map(|record| (
+                record.cancel.is_cancelled(),
+                record.cancel_requested.load(Ordering::Relaxed),
+                record.status == "Pausing",
+            )));
         cancel.cancel();
         let _ = saver.await;
         match result {
@@ -518,20 +609,21 @@ fn spawn_download_task(
                 cleanup_job_cookies(&manager, &id);
             },
             Err(error) => {
-                let stop_requested = manager.records.lock().ok()
-                    .and_then(|records| records.get(&id).map(|record| (
-                        record.cancel.is_cancelled(),
-                        record.cancel_requested.load(Ordering::Relaxed),
-                    )))
-                    .unwrap_or((error == "Cancelled", false));
-                if stop_requested.1 {
-                    cleanup_cancelled_files(&manager, &id);
-                    set_status(&manager, &id, "Cancelled", None);
-                    cleanup_job_cookies(&manager, &id);
-                } else if stop_requested.0 || error == "Cancelled" {
-                    set_status(&manager, &id, "Paused", None);
-                } else {
-                    set_status(&manager, &id, "Failed", Some(error));
+                let (transfer_was_cancelled, user_requested_cancel, user_requested_pause) =
+                    stop_snapshot.unwrap_or((error == "Cancelled", false, false));
+                match terminal_status_after_download_error(
+                    &error,
+                    transfer_was_cancelled,
+                    user_requested_cancel,
+                    user_requested_pause,
+                ) {
+                    "Cancelled" => {
+                        cleanup_cancelled_files(&manager, &id);
+                        set_status(&manager, &id, "Cancelled", None);
+                        cleanup_job_cookies(&manager, &id);
+                    }
+                    "Paused" => set_status(&manager, &id, "Paused", None),
+                    _ => set_status(&manager, &id, "Failed", Some(error)),
                 }
             },
         }
@@ -625,11 +717,14 @@ fn parse_media_analysis(raw: &str, source_url: &str) -> Result<MediaAnalysis, St
     let is_playlist = raw_entries.is_some() || json_text(&json, &["_type"])
         .map(|kind| kind == "playlist" || kind == "multi_video").unwrap_or(false);
     let mut entries = Vec::new();
+    let mut seen_entries = HashSet::new();
     if let Some(items) = raw_entries {
         entries.reserve(items.len());
         for (index, entry) in items.iter().enumerate() {
             if entry.is_null() { continue; }
             let Some(entry_url) = entry_url(entry, &extractor) else { continue; };
+            let identity = Url::parse(&entry_url).map(|parsed| download_identity_key(&parsed)).unwrap_or_else(|_| entry_url.clone());
+            if !seen_entries.insert(identity) { continue; }
             let id = json_text(entry, &["id"]).unwrap_or_else(|| format!("item-{}", index + 1));
             entries.push(MediaEntry {
                 id,
@@ -828,6 +923,73 @@ async fn inspect_media_json(
     }
 }
 
+fn download_identity_key(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default().trim_start_matches("www.")
+        .trim_start_matches("m.").to_ascii_lowercase();
+    let segments = url.path_segments()
+        .map(|parts| parts.filter(|part| !part.is_empty()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    if host == "youtu.be" {
+        if let Some(id) = segments.first() {
+            return format!("youtube:{}", id);
+        }
+    }
+    if host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtube-nocookie.com" {
+        if let Some(id) = url.query_pairs().find(|(key, _)| key == "v").map(|(_, value)| value.to_string()) {
+            if !id.is_empty() { return format!("youtube:{id}"); }
+        }
+        if let Some(index) = segments.iter().position(|part| matches!(*part, "shorts" | "live" | "embed" | "v")) {
+            if let Some(id) = segments.get(index + 1) {
+                return format!("youtube:{}", id);
+            }
+        }
+    }
+
+    if host == "fb.watch" || host.ends_with(".fb.watch") || host == "facebook.watch" {
+        if let Some(id) = segments.first() { return format!("facebook:{id}"); }
+    }
+    if host == "facebook.com" || host.ends_with(".facebook.com") || host == "fb.com" || host.ends_with(".fb.com") {
+        let query: Vec<(String, String)> = url.query_pairs().map(|(key, value)| (key.to_string(), value.to_string())).collect();
+        if let Some(id) = query.iter().find(|(key, _)| key == "v").map(|(_, value)| value.clone()) {
+            if !id.is_empty() { return format!("facebook:{id}"); }
+        }
+        if let Some(story) = query.iter().find(|(key, _)| key == "story_fbid").map(|(_, value)| value.clone()) {
+            let owner = query.iter().find(|(key, _)| key == "id").map(|(_, value)| value.clone()).unwrap_or_default();
+            return format!("facebook-story:{owner}:{story}");
+        }
+        if let Some(index) = segments.iter().position(|part| matches!(*part, "reel" | "reels" | "video")) {
+            if let Some(id) = segments.get(index + 1) { return format!("facebook:{id}"); }
+        }
+        if let Some(index) = segments.iter().position(|part| *part == "videos") {
+            if let Some(id) = segments.get(index + 2) { return format!("facebook:{id}"); }
+        }
+        if let Some(index) = segments.iter().position(|part| *part == "v") {
+            if let Some(id) = segments.get(index + 1) { return format!("facebook:{id}"); }
+        }
+    }
+
+    let mut normalized = url.clone();
+    normalized.set_fragment(None);
+    let mut query: Vec<(String, String)> = normalized.query_pairs()
+        .filter(|(key, _)| {
+            let key = key.to_ascii_lowercase();
+            !(key.starts_with("utm_") || matches!(key.as_str(),
+                "fbclid" | "gclid" | "dclid" | "si" | "feature" | "ref" | "ref_src" |
+                "__tn__" | "__cft__" | "igshid" | "mibextid" | "source"
+            ))
+        })
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    query.sort();
+    normalized.set_query(None);
+    if !query.is_empty() {
+        let mut pairs = normalized.query_pairs_mut();
+        for (key, value) in query { pairs.append_pair(&key, &value); }
+    }
+    normalized.to_string().trim_end_matches('/').to_string()
+}
+
 fn normalize_download_kind(kind: &str) -> &'static str {
     match kind {
         "file" => "file",
@@ -932,11 +1094,25 @@ async fn start_download(
         format_selector: format_selector.clone(),
         media_title,
         media_thumbnail,
+        media_activity: None,
         cancel_requested: Arc::new(AtomicBool::new(false)),
     };
     let initial = view_of(&record);
     let manager = manager.inner().clone();
-    manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?.insert(id.clone(), record);
+    {
+        let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
+        let identity = download_identity_key(&parsed);
+        let duplicate_name = records.values().find(|existing| {
+            !matches!(existing.status.as_str(), "Cancelled")
+                && Url::parse(&existing.url).map(|other| download_identity_key(&other) == identity).unwrap_or(false)
+        }).map(|existing| existing.media_title.clone().unwrap_or_else(|| existing.file_name.clone()));
+        if let Some(name) = duplicate_name {
+            drop(records);
+            if let Some(path) = cookies_file.as_deref() { let _ = std::fs::remove_file(path); }
+            return Err(format!("Already in the queue: {name}. Resume or manage the existing queue item instead of adding it again."));
+        }
+        records.insert(id.clone(), record);
+    }
     persist_records(&manager);
     spawn_download_task(app, manager, id, url, kind, destination_path, requested, cookies_file, format_selector, cancel);
     Ok(initial)
@@ -1941,6 +2117,27 @@ async fn run_media_download(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn find_completed_media_output(destination: &Path, id: &str) -> Option<PathBuf> {
+    let prefix = id.chars().take(8).collect::<String>();
+    let marker = format!(" - {prefix}.");
+    std::fs::read_dir(destination).ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return false; };
+            let lower = name.to_ascii_lowercase();
+            name.contains(&marker)
+                && !lower.ends_with(".part")
+                && !lower.contains(".part-frag")
+                && !lower.ends_with(".ytdl")
+                && !lower.ends_with(".tmp")
+                && !lower.ends_with(".temp")
+        })
+        .max_by_key(|path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok())
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
     destination: &Path, concurrency: usize, cookies_file: Option<&str>,
@@ -1954,8 +2151,10 @@ async fn run_media_download(
     configure_tool_environment(&mut command, &yt_dlp);
     configure_no_console(&mut command);
     command.arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
-        .arg("--retries").arg("10").arg("--fragment-retries").arg("10")
-        .arg("--file-access-retries").arg("3").arg("-N").arg(concurrency.to_string())
+        .arg("--socket-timeout").arg("20")
+        .arg("--retries").arg("4").arg("--fragment-retries").arg("4")
+        .arg("--extractor-retries").arg("2").arg("--file-access-retries").arg("2")
+        .arg("-N").arg(concurrency.to_string())
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
         .arg("--print").arg("before_dl:__DOWNBEST_TITLE__%(title)s")
@@ -2024,6 +2223,8 @@ async fn run_media_download(
             if let Some(index) = line.find("__DOWNBEST__") {
                 let data = &line[index + "__DOWNBEST__".len()..];
                 update_media_progress(&progress_manager, &progress_id, data);
+            } else {
+                set_media_activity_from_line(&progress_manager, &progress_id, &line);
             }
             captured.push_str(&line);
             captured.push('\n');
@@ -2050,12 +2251,18 @@ async fn run_media_download(
     let _ = stdout_task.await;
     let stderr_text = stderr_task.await.unwrap_or_default();
     if status.success() {
-        let output = manager.records.lock().ok()
-            .and_then(|records| records.get(id).and_then(|record| record.file_path.clone()));
+        let recorded = manager.records.lock().ok()
+            .and_then(|records| records.get(id).and_then(|record| record.file_path.clone()))
+            .filter(|path| Path::new(path).is_file());
+        let output = recorded.map(PathBuf::from)
+            .or_else(|| find_completed_media_output(destination, id));
         match output {
-            Some(path) if Path::new(&path).is_file() => Ok(()),
-            Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {path}")),
-            None => Err("yt-dlp finished but did not report the resulting file path. Check the selected save folder.".into()),
+            Some(path) if path.is_file() => {
+                set_file_path(manager, id, &path);
+                Ok(())
+            }
+            Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {}", path.display())),
+            None => Err("yt-dlp finished successfully but no final output file could be verified in the selected save folder.".into()),
         }
     } else {
         let tail: String = stderr_text.chars().rev().take(900).collect::<String>().chars().rev().collect();
@@ -2387,6 +2594,37 @@ mod lite_mode_tests {
     }
 
     #[test]
+    fn completed_media_file_is_recovered_when_extractor_does_not_print_its_path() {
+        let root = std::env::temp_dir().join(format!("downbest-final-output-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create media output folder");
+        let final_file = root.join("Sample video [abc123] - 12345678.mp4");
+        let partial_file = root.join("Sample video [abc123] - 12345678.mp4.part");
+        std::fs::write(&final_file, b"completed media").expect("write final media");
+        std::fs::write(&partial_file, b"incomplete fragment").expect("write partial fragment");
+
+        let recovered = super::find_completed_media_output(&root, "12345678-job")
+            .expect("recover final media file");
+        assert_eq!(recovered, final_file);
+        std::fs::remove_dir_all(root).expect("remove media output folder");
+    }
+
+    #[test]
+    fn a_real_download_error_is_failed_not_misreported_as_paused() {
+        assert_eq!(
+            super::terminal_status_after_download_error("yt-dlp finished but output file path was missing", false, false, false),
+            "Failed"
+        );
+        assert_eq!(
+            super::terminal_status_after_download_error("Cancelled", true, false, true),
+            "Paused"
+        );
+        assert_eq!(
+            super::terminal_status_after_download_error("Cancelled", true, true, false),
+            "Cancelled"
+        );
+    }
+
+    #[test]
     fn automatic_retry_backoff_is_capped_at_sixty_seconds() {
         assert_eq!(super::auto_retry_delay(1).as_secs(), 3);
         assert_eq!(super::auto_retry_delay(2).as_secs(), 6);
@@ -2437,6 +2675,41 @@ mod lite_mode_tests {
     }
 
     #[test]
+    fn youtube_and_facebook_tracking_variants_share_one_video_identity() {
+        let youtube_a = url::Url::parse("https://www.youtube.com/watch?v=abc123&utm_source=share").unwrap();
+        let youtube_b = url::Url::parse("https://youtu.be/abc123?si=tracking").unwrap();
+        assert_eq!(super::download_identity_key(&youtube_a), super::download_identity_key(&youtube_b));
+
+        let facebook_a = url::Url::parse("https://www.facebook.com/watch/?v=12345&ref=share").unwrap();
+        let facebook_b = url::Url::parse("https://m.facebook.com/reel/12345/").unwrap();
+        assert_eq!(super::download_identity_key(&facebook_a), super::download_identity_key(&facebook_b));
+    }
+
+    #[test]
+    fn media_analysis_removes_duplicate_video_entries() {
+        let raw = r#"{
+            "_type":"playlist",
+            "extractor_key":"Youtube",
+            "title":"Sample list",
+            "entries":[
+                {"id":"abc123","title":"One","url":"https://www.youtube.com/watch?v=abc123"},
+                {"id":"abc123","title":"One duplicate","url":"https://youtu.be/abc123?si=tracking"},
+                {"id":"def456","title":"Two","url":"https://www.youtube.com/watch?v=def456"}
+            ]
+        }"#;
+        let parsed = super::parse_media_analysis(raw, "https://www.youtube.com/playlist?list=test").unwrap();
+        assert_eq!(parsed.entries.len(), 2);
+        assert_eq!(parsed.entries[0].title, "One");
+    }
+
+    #[test]
+    fn media_activity_messages_explain_extractor_stages() {
+        assert_eq!(super::media_activity_from_line("[youtube] abc: Downloading webpage"), Some("Fetching video information"));
+        assert_eq!(super::media_activity_from_line("[download] 25.0% of 10.00MiB"), Some("Downloading media"));
+        assert_eq!(super::media_activity_from_line("[Merger] Merging formats into mp4"), Some("Merging audio and video"));
+    }
+
+    #[test]
     fn unrelated_download_hosts_are_not_forced_to_media_extractor() {
         let parsed = url::Url::parse("https://downloads.example.org/file.zip").unwrap();
         assert!(!needs_media_extractor(&parsed));
@@ -2469,6 +2742,7 @@ mod lite_mode_tests {
             format_selector: None,
             media_title: None,
             media_thumbnail: None,
+            media_activity: None,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -2496,6 +2770,41 @@ mod lite_mode_tests {
         assert!(item.cancel_requested.load(Ordering::Relaxed));
         drop(records);
         std::fs::remove_dir_all(root).expect("remove cancellation restore folder");
+    }
+
+    #[test]
+    fn restored_legacy_queue_does_not_auto_resume_duplicate_media() {
+        let folder = std::env::temp_dir().join(format!("downbest-dedup-restore-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create duplicate restore folder");
+        let queue_file = folder.join("queue.json");
+
+        let manager = DownloadManager::default();
+        manager.restore_queue(queue_file.clone());
+        let mut first = queued_record("duplicate-one");
+        first.url = "https://www.youtube.com/watch?v=restore-duplicate&utm_source=share".into();
+        first.status = "Downloading".into();
+        first.destination = folder.display().to_string();
+        let mut second = queued_record("duplicate-two");
+        second.url = "https://youtu.be/restore-duplicate?si=tracking".into();
+        second.status = "Downloading".into();
+        second.destination = folder.display().to_string();
+        manager.records.lock().expect("lock original queue").extend([
+            (first.id.clone(), first),
+            (second.id.clone(), second),
+        ]);
+        persist_records(&manager);
+
+        let reopened = DownloadManager::default();
+        let auto_resume = reopened.restore_queue(queue_file);
+        assert_eq!(auto_resume.len(), 1, "only one copy of a video should auto-resume");
+
+        let records = reopened.records.lock().expect("lock restored queue");
+        let queued_count = records.values().filter(|item| item.status == "Queued").count();
+        let cancelled_count = records.values().filter(|item| item.status == "Cancelled").count();
+        assert_eq!(queued_count, 1);
+        assert_eq!(cancelled_count, 1);
+        drop(records);
+        std::fs::remove_dir_all(folder).expect("remove duplicate restore folder");
     }
 
     #[test]
