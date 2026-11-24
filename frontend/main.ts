@@ -415,7 +415,7 @@ function normalizedLink(raw: string): string {
 function isDirectFileUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
-    const candidate = url.pathname + " " + url.search;
+    const candidate = url.pathname + url.search;
     return /\.(?:apk|aab|exe|msi|msix|appx|dmg|pkg|deb|rpm|appimage|zip|7z|rar|iso|pdf|docx?|xlsx?|pptx?|csv|txt|tar|gz|mp4|m4v|mov|mkv|webm|avi|mp3|m4a|aac|wav|flac|opus|jpg|jpeg|png|gif|webp)(?:$|[?&#/])/i.test(candidate);
   } catch {
     return false;
@@ -488,17 +488,26 @@ async function autoProcessPastedLinks() {
   const mediaErrors: string[] = [];
   let queued = 0;
   mediaAnalyzing = candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url));
+  const mediaSection = document.querySelector<HTMLElement>("#media-library")!;
+  const mediaError = document.querySelector<HTMLElement>("#media-error")!;
+  mediaAnalysis = null;
+  mediaFormats = [];
   if (mediaAnalyzing) {
-    const section = document.querySelector<HTMLElement>("#media-library")!;
-    const error = document.querySelector<HTMLElement>("#media-error")!;
-    section.hidden = false;
-    error.hidden = false;
-    error.textContent = "Checking media details and available videos…";
-    mediaAnalysis = null;
-    mediaFormats = [];
+    mediaSection.hidden = false;
+    mediaError.hidden = false;
+    mediaError.textContent = "Checking media details and available videos…";
+    document.querySelector<HTMLDivElement>("#media-entry-list")!.innerHTML = "";
+    document.querySelector<HTMLElement>("#media-title")!.textContent = "Analyzing media…";
+    document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "Fetching source information and available formats";
+    document.querySelector<HTMLDivElement>("#media-preview-thumb")!.innerHTML = "<span>▶</span>";
+    document.querySelector<HTMLButtonElement>("#download-selected-media")!.disabled = true;
+    document.querySelector<HTMLElement>("#media-entry-count")!.textContent = "Analyzing…";
+    document.querySelector<HTMLElement>("#media-selection-summary")!.textContent = "Please wait…";
     updateAutoStatus("Recognizing media link…", "working");
   } else {
-    updateAutoStatus("Direct file detected · starting download…", "working");
+    mediaSection.hidden = true;
+    mediaError.hidden = true;
+    updateAutoStatus("Checking link type…", "working");
   }
   try {
     for (const url of candidates) {
