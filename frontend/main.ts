@@ -186,7 +186,6 @@ function renderDownloads() {
       d.status === "Extracting media" ? (d.media_activity || "Fetching video info") :
       d.status === "Retrying" ? "Auto retrying" :
       d.status === "Connecting" ? "Connecting" :
-      d.status === "Extracting media" ? "Finding media" :
       d.status === "Cancelling" ? "Cancelling" :
       d.status === "Pausing" ? "Pausing" : d.status;
     const sizeDetail = d.total_bytes
@@ -528,7 +527,7 @@ async function inspectMediaLink() {
   const error = document.querySelector<HTMLElement>("#media-error")!;
   section.hidden = false;
   error.hidden = false;
-  error.textContent = "Reading video and playlist information…";
+  error.textContent = "Fetching video and playlist details (this may take a moment)…";
   try {
     const result = await invoke<MediaAnalysis>("analyze_media", { url });
     if (!result.entries.length) {
