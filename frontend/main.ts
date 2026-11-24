@@ -105,7 +105,7 @@ root.innerHTML = [
   '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
   '<div id="download-list" class="download-list"></div></section>',
-  '<footer><span>DOWNBEST LITE · Fast downloads, lighter CPU use.</span><span>Windows · macOS · Linux · Android · iOS</span></footer>',
+  '<footer><span>DOWNBEST LITE · Fast downloads, lighter CPU use.</span><span>Windows · macOS · Linux · Android · iOS</span><span class="footer-credit">NTech</span></footer>',
   '</main></div><div id="toast" class="toast"></div>'
 ].join("");
 
