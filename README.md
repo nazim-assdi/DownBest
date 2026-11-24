@@ -16,7 +16,7 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Eye Comfort is the default UI theme, with Midnight and Soft Light options, locally persisted appearance preferences, reduced motion and larger text controls; the interface uses system fonts and works without a remote font request.
 - Desktop yt-dlp, aria2c and LGPL FFmpeg/FFprobe are fetched from upstream releases and bundled into Windows, macOS and Linux installers; no separate desktop tool installation is required.
 - Desktop yt-dlp integration for supported media sites, generic HTML media pages and HLS/DASH manifests. Both process output streams are drained concurrently: stderr drives live progress and stdout reports the final post-processed file path. Windows extractor processes launch without a visible console window.
-- Media Link Analyzer for YouTube/Facebook and other supported extractors: previews playlist/video entries, shows real available resolutions, FPS, format and estimated file size when reported, lets users select all or individual videos, then creates one queue item per selected video so each entry has its own progress, pause, cancel and resume controls.
+- Media Link Analyzer for YouTube/Facebook and other supported extractors: previews playlist/video entries, shows real available resolutions, FPS, format and estimated file size when reported, selects only the first item by default to prevent accidental full-playlist downloads, and lets users explicitly select more videos. Duplicate video entries and already queued matching URLs are rejected.
 - The download form keeps Auto detect as the default. Direct file is the only manual type override; normal media downloads automatically include the best available audio and video streams.
 - Single-video quality picker: select an exact muxed video+audio format (for example, a specific 1080p MP4/FPS/size variant) or use a maximum-resolution rule to let the extractor choose and merge the best matching streams. Playlist quality uses a maximum-resolution cap per item because each entry can expose different format IDs.
 - YouTube JavaScript challenge support: desktop packages include Deno 2.9.8 and yt-dlp's EJS challenge scripts; Android packages include an ABI-matched QuickJS runtime built into the APK. Availability depends on the source and extractor; protected or unavailable formats cannot be selected.
@@ -29,8 +29,8 @@ DownBest Lite combines a native async HTTP/HTTPS engine with desktop media extra
 - Desktop downloads default directly to the operating system Downloads directory, without a DownBest subfolder. Android uses private staging during a transfer, then publishes completed files into the shared system Downloads collection through MediaStore. iOS retains app-private storage.
 - Persistent download queue stored in the app-data folder; unfinished jobs return as Paused after an app/PC restart and can be resumed from the queue.
 - Direct HTTP(S) downloads keep durable partial files, validate byte-range offsets, use ETag/Last-Modified validators when available, and sync partial data to disk periodically.
-- Desktop yt-dlp downloads use a stable per-job output template, `--continue`, `--part` and `--keep-fragments`; resumable fragments are retained when yt-dlp and the source extractor support them.
-- Android yt-dlp downloads use the same stable job ID and resumable .part/fragment flags. The active extractor future can be interrupted by Pause, then re-run against the same partial files after restart.
+- Desktop yt-dlp downloads use a stable per-job output template, `--continue` and `--part`; temporary fragments are not kept after a successful download, while yt-dlp retains supported partial state during an interrupted transfer.
+- Android yt-dlp downloads use the same stable job ID and resumable .part/fragment handling. The active extractor future can be interrupted by Pause, then re-run against the same partial files after restart. On success, DownBest publishes only the final output and removes job-specific fragment/temp files.
 - One Tauri 2 codebase and one Git branch: `main`.
 
 ## Supported targets and current limits
@@ -138,7 +138,7 @@ The media library now offers only **Default** and **Audio only**. Default downlo
 
 The iOS build currently supports direct audio file URLs, but not audio-only extraction from remote video/playlist pages. Desktop and Android builds support the Audio only mode.
 
-The general download form has no manual content-type switch: automatic routing chooses the media extractor for supported media pages and the native HTTP downloader for direct files.
+The general download form has no manual content-type switch: automatic routing chooses the media extractor for supported media pages and the native HTTP downloader for direct files. The media queue blocks duplicate active/paused URLs, displays extractor stages such as fetching, downloading and merging, and shows media thumbnails only for recognized video sources—not app installers or documents.
 
 
 ## Automatic resume
