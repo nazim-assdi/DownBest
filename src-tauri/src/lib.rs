@@ -2800,6 +2800,25 @@ mod lite_mode_tests {
     }
 
     #[test]
+    fn yt_dlp_progress_updates_the_queue_speed_in_bytes_per_second() {
+        let manager = DownloadManager::default();
+        let mut record = queued_record("speed-job");
+        record.status = "Extracting media".into();
+        manager.records.lock().expect("lock queue")
+            .insert(record.id.clone(), record);
+
+        update_media_progress(&manager, "speed-job", "4096|16384|16384|1536.75");
+
+        let records = manager.records.lock().expect("lock queue");
+        let updated = records.get("speed-job").expect("speed job");
+        assert_eq!(updated.downloaded.load(Ordering::Relaxed), 4096);
+        assert_eq!(updated.total, Some(16384));
+        assert_eq!(updated.speed_bytes_sec, 1537);
+        assert_eq!(updated.status, "Downloading");
+        assert_eq!(updated.media_activity.as_deref(), Some("Downloading media"));
+    }
+
+    #[test]
     fn cancelled_job_remains_cancelled_after_queue_restore() {
         let root = std::env::temp_dir().join(format!("downbest-cancel-restore-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create cancellation restore folder");
