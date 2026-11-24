@@ -73,7 +73,7 @@ struct DownloadRecord {
     id: String, url: String, file_name: String, kind: String, status: String,
     destination: String, file_path: Option<String>, downloaded: Arc<AtomicU64>, total: Option<u64>,
     started: Instant, error: Option<String>, cancel: CancellationToken,
-    progress_override: Option<f64>, concurrency: usize,
+    progress_override: Option<f64>, speed_bytes_sec: u64, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
     cookies_file: Option<String>,
     format_selector: Option<String>,
@@ -126,10 +126,36 @@ impl DownloadManager {
                 let was_cancelled = item.cancel_requested;
                 let was_interrupted = matches!(item.status.as_str(),
                     "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying");
+                // A final output can be committed just before the app exits but before
+                // the queue status is persisted as Completed. Recover that file rather
+                // than automatically downloading the same media again on next launch.
+                let recovered_output = if was_interrupted {
+                    item.file_path.as_deref().map(PathBuf::from).filter(|path| path.is_file())
+                        .or_else(|| {
+                            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                            {
+                                find_completed_media_output(&PathBuf::from(&item.destination), &item.id)
+                            }
+                            #[cfg(any(target_os = "android", target_os = "ios"))]
+                            {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+                let recovered_file = recovered_output.is_some();
+                let recovered_output_path = recovered_output.as_ref()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let recovered_bytes = recovered_output.as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(item.downloaded_bytes);
+                let is_completed = item.status == "Completed" || recovered_file;
                 let identity = Url::parse(&item.url).ok().map(|url| download_identity_key(&url));
                 let duplicate_interrupted_job = if was_cancelled {
                     false
-                } else if item.status == "Completed" {
+                } else if is_completed {
                     if let Some(key) = identity { seen_media.insert(key); }
                     false
                 } else if let Some(key) = identity {
@@ -140,6 +166,8 @@ impl DownloadManager {
                 let should_cancel = was_cancelled || duplicate_interrupted_job;
                 let status = if should_cancel {
                     "Cancelled".to_string()
+                } else if is_completed {
+                    "Completed".to_string()
                 } else if was_interrupted {
                     "Queued".to_string()
                 } else {
@@ -151,10 +179,14 @@ impl DownloadManager {
                 let id = item.id.clone();
                 records.insert(id.clone(), DownloadRecord {
                     id: item.id, url: item.url, file_name: item.file_name, kind: item.kind,
-                    status, destination: item.destination, file_path: item.file_path,
-                    downloaded: Arc::new(AtomicU64::new(item.downloaded_bytes)),
-                    total: item.total_bytes, started: Instant::now(), error: item.error,
-                    cancel: CancellationToken::new(), progress_override: None,
+                    status, destination: item.destination, file_path: recovered_output_path.or(item.file_path),
+                    downloaded: Arc::new(AtomicU64::new(recovered_bytes)),
+                    total: if recovered_file { Some(recovered_bytes) } else { item.total_bytes },
+                    started: Instant::now(),
+                    error: if recovered_file { None } else { item.error },
+                    cancel: CancellationToken::new(),
+                    progress_override: if is_completed { Some(100.0) } else { None },
+                    speed_bytes_sec: 0,
                     concurrency: item.concurrency.clamp(1, 16),
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
@@ -165,7 +197,7 @@ impl DownloadManager {
                     cancel_requested: Arc::new(AtomicBool::new(should_cancel)),
                 });
                 if should_cancel { cancelled_ids.push(id); }
-                else if was_interrupted { auto_resume_ids.push(id); }
+                else if was_interrupted && !is_completed { auto_resume_ids.push(id); }
             }
         }
         for id in cancelled_ids {
@@ -335,7 +367,7 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
         kind: record.kind.clone(), status: record.status.clone(), destination: record.destination.clone(),
         file_path: record.file_path.clone(), downloaded_bytes: downloaded, total_bytes: record.total,
         speed_bytes_sec: if matches!(record.status.as_str(), "Downloading" | "Extracting media") {
-            (downloaded as f64 / elapsed) as u64
+            record.speed_bytes_sec.max((downloaded as f64 / elapsed) as u64)
         } else { 0 },
         progress, error: record.error.clone(),
         media_title: record.media_title.clone(),
@@ -346,10 +378,16 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
-            if record.status != status && matches!(status, "Downloading" | "Extracting media") {
+            if record.status != status && matches!(status, "Connecting" | "Downloading" | "Extracting media") {
                 record.started = Instant::now();
+                record.speed_bytes_sec = 0;
             }
-            if status == "Completed" { record.progress_override = Some(100.0); }
+            if status == "Completed" {
+                record.progress_override = Some(100.0);
+                record.speed_bytes_sec = 0;
+            } else if matches!(status, "Paused" | "Failed" | "Cancelled") {
+                record.speed_bytes_sec = 0;
+            }
             record.status = status.to_string();
             record.error = error;
             if status == "Extracting media" {
@@ -443,6 +481,7 @@ fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &
             if progress.downloaded_bytes > 0 && record.status != "Downloading" {
                 record.started = Instant::now();
                 record.status = "Downloading".into();
+                record.media_activity = Some("Downloading media".into());
                 record.error = None;
             }
         }
@@ -454,6 +493,9 @@ fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
     let downloaded = fields.first().and_then(|value| value.parse::<u64>().ok());
     let total = fields.get(1).and_then(|value| value.parse::<u64>().ok())
         .or_else(|| fields.get(2).and_then(|value| value.parse::<u64>().ok()));
+    let speed = fields.get(3).and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as u64).unwrap_or(0);
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
             if let Some(value) = downloaded {
@@ -462,9 +504,11 @@ fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
             if let Some(value) = total {
                 record.total = Some(value);
             }
+            record.speed_bytes_sec = speed;
             if downloaded.unwrap_or(0) > 0 && record.status != "Downloading" {
                 record.started = Instant::now();
                 record.status = "Downloading".into();
+                record.media_activity = Some("Downloading media".into());
                 record.error = None;
             }
         }
@@ -1088,7 +1132,7 @@ async fn start_download(
         kind: kind.clone(), status: "Queued".into(),
         destination: destination_path.display().to_string(), file_path: None,
         downloaded: Arc::new(AtomicU64::new(0)), total: None, started: Instant::now(),
-        error: None, cancel: cancel.clone(), progress_override: None,
+        error: None, cancel: cancel.clone(), progress_override: None, speed_bytes_sec: 0,
         concurrency: requested, etag: None, last_modified: None,
         cookies_file: cookies_file.clone(),
         format_selector: format_selector.clone(),
@@ -2156,7 +2200,7 @@ async fn run_media_download(
         .arg("--extractor-retries").arg("2").arg("--file-access-retries").arg("2")
         .arg("-N").arg(concurrency.to_string())
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
-        .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
+        .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s")
         .arg("--print").arg("before_dl:__DOWNBEST_TITLE__%(title)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
@@ -2735,6 +2779,7 @@ mod lite_mode_tests {
             error: None,
             cancel: CancellationToken::new(),
             progress_override: None,
+            speed_bytes_sec: 0,
             concurrency: 2,
             etag: None,
             last_modified: None,
