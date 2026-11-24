@@ -617,7 +617,10 @@ async function autoProcessPastedLinks() {
     updateMediaSelection();
     autoProcessing = false;
     if (input.value.trim()) scheduleAutoProcess(140);
-    else updateUrlCount();
+    else {
+      autoAttempted.clear();
+      updateUrlCount();
+    }
   }
 }
 const urlInput = document.querySelector<HTMLTextAreaElement>("#urls")!;
