@@ -202,7 +202,7 @@ function renderDownloads() {
       d.status === "Extracting media" ? (d.media_activity || "Fetching details…") :
       d.status === "Downloading" ? "Receiving…" :
       done ? "Complete" : paused ? "Paused" : "—";
-    const detail = failedItem ? safe(d.error || "Download failed · press Resume to retry") :
+    const detail = failedItem ? safe(d.error || "Download failed · press Retry to try again") :
       paused ? "Paused · " + sizeDetail + " saved. Resume when you're ready." :
       cancelled ? "This transfer was cancelled." :
       done ? "Download completed successfully." :
@@ -240,9 +240,11 @@ function renderDownloads() {
         ? '<button class="open-button" data-open="' + safe(d.id) + '">' + icons.external + '<span>Open file</span></button>'
         : done && d.file_path && desktopFileActions
           ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
-          : paused || failedItem
-            ? '<button class="resume-button" data-resume="' + safe(d.id) + '">' + icons.refresh + '<span>Resume</span></button>'
-            : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
+          : paused
+            ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Continue from saved progress">' + icons.refresh + '<span>Resume</span></button>'
+            : failedItem
+              ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry this failed download">' + icons.refresh + '<span>Retry</span></button>'
+              : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
     const transferMeta = '<div class="download-meta">' +
       '<span class="download-meta-item"><small>RECEIVED</small><b>' + safe(receivedLabel) + '</b></span>' +
       '<span class="download-meta-item speed-meta"><small>' + (done ? "RESULT" : "SPEED") + '</small><b>' + safe(done ? "Saved" : speed) + '</b></span>' +
