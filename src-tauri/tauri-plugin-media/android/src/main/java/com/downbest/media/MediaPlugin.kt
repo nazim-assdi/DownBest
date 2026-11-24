@@ -340,6 +340,12 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     output = m4a
                 }
 
+                // A single media job must leave only its final, playable output in Downloads.
+                // This also removes any split audio/video tracks yt-dlp left beside the muxed file.
+                folder.listFiles()?.filter {
+                    it != output && it.name.contains(jobMarker)
+                }?.forEach { it.delete() }
+
                 val result = JSObject()
                 result.put("filePath", output.absolutePath)
                 result.put("fileName", output.name)
