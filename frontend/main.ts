@@ -416,14 +416,14 @@ function isDirectFileUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
     const candidate = url.pathname + " " + url.search;
-    return /\\.(?:apk|aab|exe|msi|msix|appx|dmg|pkg|deb|rpm|appimage|zip|7z|rar|iso|pdf|docx?|xlsx?|pptx?|csv|txt|tar|gz|mp4|m4v|mov|mkv|webm|avi|mp3|m4a|aac|wav|flac|opus|jpg|jpeg|png|gif|webp)(?:$|[?&#/])/i.test(candidate);
+    return /\.(?:apk|aab|exe|msi|msix|appx|dmg|pkg|deb|rpm|appimage|zip|7z|rar|iso|pdf|docx?|xlsx?|pptx?|csv|txt|tar|gz|mp4|m4v|mov|mkv|webm|avi|mp3|m4a|aac|wav|flac|opus|jpg|jpeg|png|gif|webp)(?:$|[?&#/])/i.test(candidate);
   } catch {
     return false;
   }
 }
 function isMediaStreamUrl(raw: string): boolean {
   try {
-    return /\\.(?:m3u8|mpd)(?:$|[?&#])/i.test(new URL(raw).pathname + new URL(raw).search);
+    return /\.(?:m3u8|mpd)(?:$|[?&#])/i.test(new URL(raw).pathname + new URL(raw).search);
   } catch {
     return false;
   }
@@ -459,7 +459,7 @@ async function autoProcessPastedLinks() {
   if (autoProcessing) return;
   const input = document.querySelector<HTMLTextAreaElement>("#urls")!;
   const snapshot = input.value;
-  const links = snapshot.split(/\\r?\\n/).map(line => line.trim()).filter(Boolean);
+  const links = snapshot.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   const linkKeys = new Set(links.map(normalizedLink));
   for (const key of [...autoAttempted]) {
     if (!linkKeys.has(key)) autoAttempted.delete(key);
@@ -487,7 +487,7 @@ async function autoProcessPastedLinks() {
   const formats: MediaFormat[] = [];
   const mediaErrors: string[] = [];
   let queued = 0;
-  mediaAnalyzing = candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url) || !isDirectFileUrl(url));
+  mediaAnalyzing = candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url));
   if (mediaAnalyzing) {
     const section = document.querySelector<HTMLElement>("#media-library")!;
     const error = document.querySelector<HTMLElement>("#media-error")!;
@@ -564,12 +564,20 @@ async function autoProcessPastedLinks() {
         error.hidden = false;
         error.textContent = mediaErrors.join(" · ");
       }
-    } else if (mediaErrors.length && candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url))) {
+    } else if (candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url))) {
       const section = document.querySelector<HTMLElement>("#media-library")!;
       const error = document.querySelector<HTMLElement>("#media-error")!;
-      section.hidden = false;
-      error.hidden = false;
-      error.textContent = mediaErrors.join(" · ");
+      if (mediaErrors.length) {
+        section.hidden = false;
+        error.hidden = false;
+        error.textContent = mediaErrors.join(" · ");
+      } else {
+        section.hidden = true;
+        error.hidden = true;
+      }
+    } else {
+      const section = document.querySelector<HTMLElement>("#media-library")!;
+      section.hidden = true;
     }
 
     if (queued) {
@@ -578,19 +586,19 @@ async function autoProcessPastedLinks() {
       toast(queued + (queued === 1 ? " direct download started." : " direct downloads started."));
     }
     if (succeeded.size && input.value === snapshot) {
-      input.value = snapshot.split(/\\r?\\n/)
+      input.value = snapshot.split(/\r?\n/)
         .filter(line => !succeeded.has(normalizedLink(line)))
-        .join("\\n");
+        .join("\n");
       updateUrlCount();
     }
     if (analyses.length) {
       updateAutoStatus(analyses.length + " media source(s) ready · choose items and press Download.", "success");
       toast(mediaAnalysis!.entries.length + " media item(s) ready in the Media Library.");
-    } else if (queued) {
-      updateAutoStatus("Download started · live progress is shown in Transfer Activity.", "success");
     } else if (mediaErrors.length) {
       updateAutoStatus("Could not process the link · check the message above and try again.", "error");
       toast(mediaErrors[0], true);
+    } else if (queued) {
+      updateAutoStatus("Download started · live progress is shown in Transfer Activity.", "success");
     }
   } catch (problem) {
     updateAutoStatus("Link processing failed · " + String(problem), "error");
@@ -610,7 +618,7 @@ urlInput.addEventListener("input", () => {
 });
 urlInput.addEventListener("paste", event => {
   const pasted = event.clipboardData?.getData("text") || "";
-  for (const line of pasted.split(/\\r?\\n/).map(value => value.trim()).filter(Boolean)) {
+  for (const line of pasted.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
     autoAttempted.delete(normalizedLink(line));
   }
   window.setTimeout(() => scheduleAutoProcess(90), 35);
