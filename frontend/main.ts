@@ -565,7 +565,7 @@ async function autoProcessPastedLinks() {
         entryCount: analyses.reduce((sum, item) => sum + item.entryCount, 0),
         entries: [...uniqueEntries.values()]
       };
-      mediaFormats = [...new Map(formats.map(format => [format.formatId + "|" + format.resolution, format])).values()];
+      mediaFormats = [...new Map<string, MediaFormat>(formats.map(format => [format.formatId + "|" + format.resolution, format] as const)).values()];
       renderMediaLibrary();
       renderMediaResolutionOptions(mediaFormats);
       if (mediaErrors.length) {
@@ -748,6 +748,8 @@ async function downloadSelectedMedia() {
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media")!;
   const audioOnly = document.querySelector<HTMLSelectElement>("#media-quality-select")!.value === "audio";
   const formatSelector = audioOnly ? "audio" : (document.querySelector<HTMLSelectElement>("#media-resolution-select")!.value || null);
+  const destination = document.querySelector<HTMLInputElement>("#destination")!.value.trim();
+  const concurrency = Number(document.querySelector<HTMLSelectElement>("#concurrency")!.value);
   button.disabled = true;
   let added = 0;
   let failed = 0;
@@ -759,8 +761,8 @@ async function downloadSelectedMedia() {
         return invoke("start_download", {
           url: entry.url,
           kind: audioOnly ? "audio" : "auto",
-          destination: null,
-          concurrency: 8,
+          destination: destination || null,
+          concurrency,
           cookies: null,
           formatSelector,
           mediaTitle: entry.title,
