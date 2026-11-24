@@ -477,7 +477,7 @@ function updateMediaSelection() {
   if (summary) summary.textContent = quality?.value === "audio"
     ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
     : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
-  if (resolution) resolution.disabled = mediaAnalyzing || quality?.value === "audio" || !mediaFormats.length;
+  if (resolution) resolution.disabled = mediaAnalyzing || quality?.value === "audio" || resolution.options.length <= 1;
   const resolutionSummary = document.querySelector<HTMLElement>("#media-resolution-summary");
   if (resolutionSummary) {
     if (quality?.value === "audio") resolutionSummary.textContent = "Resolution is not used for audio-only downloads.";
@@ -535,8 +535,8 @@ function renderMediaResolutionOptions(formats: MediaFormat[]) {
     .filter(format => format.isVideo)
     .map(format => {
       if (format.height && format.height > 0) return format.height;
-      const byDimensions = format.resolution.match(/x(\\d{3,5})$/i);
-      const byLabel = format.resolution.match(/(\\d{3,5})p/i);
+      const byDimensions = format.resolution.match(/x(\d{3,5})$/i);
+      const byLabel = format.resolution.match(/(\d{3,5})p/i);
       return Number((byDimensions || byLabel)?.[1] || 0);
     })
     .filter(height => Number.isFinite(height) && height >= 144)))
