@@ -2594,6 +2594,21 @@ mod lite_mode_tests {
     }
 
     #[test]
+    fn completed_media_file_is_recovered_when_extractor_does_not_print_its_path() {
+        let root = std::env::temp_dir().join(format!("downbest-final-output-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create media output folder");
+        let final_file = root.join("Sample video [abc123] - 12345678.mp4");
+        let partial_file = root.join("Sample video [abc123] - 12345678.mp4.part");
+        std::fs::write(&final_file, b"completed media").expect("write final media");
+        std::fs::write(&partial_file, b"incomplete fragment").expect("write partial fragment");
+
+        let recovered = super::find_completed_media_output(&root, "12345678-job")
+            .expect("recover final media file");
+        assert_eq!(recovered, final_file);
+        std::fs::remove_dir_all(root).expect("remove media output folder");
+    }
+
+    #[test]
     fn a_real_download_error_is_failed_not_misreported_as_paused() {
         assert_eq!(
             super::terminal_status_after_download_error("yt-dlp finished but output file path was missing", false, false, false),
