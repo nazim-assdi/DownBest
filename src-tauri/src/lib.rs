@@ -109,7 +109,16 @@ impl DownloadManager {
         let fallback = path.with_extension("json.tmp");
         let bytes = std::fs::read(&path).or_else(|_| std::fs::read(&fallback));
         let Ok(bytes) = bytes else { return Vec::new(); };
-        let Ok(items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return Vec::new(); };
+        let Ok(mut items) = serde_json::from_slice::<Vec<PersistedDownload>>(&bytes) else { return Vec::new(); };
+        // Prefer completed output when resolving legacy duplicate queue entries, then paused/failed
+        // jobs, then interrupted jobs. HashMap persistence order is otherwise nondeterministic.
+        items.sort_by_key(|item| match item.status.as_str() {
+            "Completed" => 0,
+            "Paused" | "Failed" => 1,
+            "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying" => 2,
+            _ => 3,
+        });
+        let mut seen_media = HashSet::new();
         let mut cancelled_ids = Vec::new();
         let mut auto_resume_ids = Vec::new();
         if let Ok(mut records) = self.records.lock() {
@@ -117,7 +126,19 @@ impl DownloadManager {
                 let was_cancelled = item.cancel_requested;
                 let was_interrupted = matches!(item.status.as_str(),
                     "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying");
-                let status = if was_cancelled {
+                let identity = Url::parse(&item.url).ok().map(|url| download_identity_key(&url));
+                let duplicate_interrupted_job = if was_cancelled {
+                    false
+                } else if item.status == "Completed" {
+                    if let Some(key) = identity { seen_media.insert(key); }
+                    false
+                } else if let Some(key) = identity {
+                    !seen_media.insert(key)
+                } else {
+                    false
+                };
+                let should_cancel = was_cancelled || duplicate_interrupted_job;
+                let status = if should_cancel {
                     "Cancelled".to_string()
                 } else if was_interrupted {
                     "Queued".to_string()
@@ -141,9 +162,9 @@ impl DownloadManager {
                     media_title: item.media_title,
                     media_thumbnail: item.media_thumbnail,
                     media_activity: None,
-                    cancel_requested: Arc::new(AtomicBool::new(was_cancelled)),
+                    cancel_requested: Arc::new(AtomicBool::new(should_cancel)),
                 });
-                if was_cancelled { cancelled_ids.push(id); }
+                if should_cancel { cancelled_ids.push(id); }
                 else if was_interrupted { auto_resume_ids.push(id); }
             }
         }
@@ -2666,6 +2687,41 @@ mod lite_mode_tests {
         assert!(item.cancel_requested.load(Ordering::Relaxed));
         drop(records);
         std::fs::remove_dir_all(root).expect("remove cancellation restore folder");
+    }
+
+    #[test]
+    fn restored_legacy_queue_does_not_auto_resume_duplicate_media() {
+        let folder = std::env::temp_dir().join(format!("downbest-dedup-restore-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create duplicate restore folder");
+        let queue_file = folder.join("queue.json");
+
+        let manager = DownloadManager::default();
+        manager.restore_queue(queue_file.clone());
+        let mut first = queued_record("duplicate-one");
+        first.url = "https://www.youtube.com/watch?v=restore-duplicate&utm_source=share".into();
+        first.status = "Downloading".into();
+        first.destination = folder.display().to_string();
+        let mut second = queued_record("duplicate-two");
+        second.url = "https://youtu.be/restore-duplicate?si=tracking".into();
+        second.status = "Downloading".into();
+        second.destination = folder.display().to_string();
+        manager.records.lock().expect("lock original queue").extend([
+            (first.id.clone(), first),
+            (second.id.clone(), second),
+        ]);
+        persist_records(&manager);
+
+        let reopened = DownloadManager::default();
+        let auto_resume = reopened.restore_queue(queue_file);
+        assert_eq!(auto_resume.len(), 1, "only one copy of a video should auto-resume");
+
+        let records = reopened.records.lock().expect("lock restored queue");
+        let queued_count = records.values().filter(|item| item.status == "Queued").count();
+        let cancelled_count = records.values().filter(|item| item.status == "Cancelled").count();
+        assert_eq!(queued_count, 1);
+        assert_eq!(cancelled_count, 1);
+        drop(records);
+        std::fs::remove_dir_all(folder).expect("remove duplicate restore folder");
     }
 
     #[test]
