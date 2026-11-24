@@ -228,7 +228,12 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--newline")
                     .addOption("--continue")
                     .addOption("--part")
-                    .addOption("--keep-fragments")
+                    .addOption("--socket-timeout", "20")
+                    .addOption("--retries", "4")
+                    .addOption("--fragment-retries", "4")
+                    .addOption("--extractor-retries", "2")
+                    .addOption("--file-access-retries", "2")
+                    .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
 
                 addJavascriptRuntime(request)
                 if (!args.cookiesFile.isNullOrBlank()) {
@@ -309,12 +314,19 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 }
 
                 val jobMarker = " - ${args.jobId}."
-                val downloaded = folder.listFiles()
-                    ?.filter { it.isFile && it.name.contains(jobMarker) && !it.name.endsWith(".part") }
+                val printedPath = Regex("(?m)^__DOWNBEST_FILE__(.+)$")
+                    .find(response.output ?: "")?.groupValues?.get(1)?.trim()
+                val printedFile = printedPath?.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile }
+                val downloaded = printedFile ?: folder.listFiles()
+                    ?.filter { it.isFile && it.name.contains(jobMarker) && !isExtractorTemporaryFile(it.name) }
                     ?.maxByOrNull { it.lastModified() }
-                    ?: throw IllegalStateException("The extractor finished but no output file was found for this job.")
+                    ?: throw IllegalStateException("The extractor finished but no final output file was found for this job.")
 
                 var output = downloaded
+                // Remove stale fragment/temporary files for this job, but never touch the final output.
+                folder.listFiles()?.filter {
+                    it != output && it.name.contains(jobMarker) && isExtractorTemporaryFile(it.name)
+                }?.forEach { it.delete() }
                 // Android has no desktop ffmpeg executable. The bundled LGPL
                 // FFmpegKit converts audio-only downloads into a portable M4A.
                 if (args.kind == "audio") {
@@ -339,6 +351,12 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 cancelledGenerations.remove(args.jobId, generation)
             }
         }, "DownBest-media-download").start()
+    }
+
+    private fun isExtractorTemporaryFile(fileName: String): Boolean {
+        val name = fileName.lowercase()
+        return name.endsWith(".part") || name.contains(".part-frag") ||
+            name.endsWith(".ytdl") || name.endsWith(".temp") || name.endsWith(".tmp")
     }
 
     private fun parseTotalBytes(line: String): Long? {
