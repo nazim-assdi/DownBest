@@ -82,7 +82,7 @@ Desktop releases now bundle platform-matching `yt-dlp`, `aria2c`, `ffmpeg` and `
 
 ## GitHub Actions builds
 
-The workflow runs on pushes to `main` and can also be started manually. It generates the platform icons and builds:
+The workflow runs on pushes to `main`, pull requests targeting `main`, and can also be started manually. It generates the platform icons and builds:
 
 - Windows EXE (NSIS) and MSI
 - macOS DMG for Apple Silicon and Intel
