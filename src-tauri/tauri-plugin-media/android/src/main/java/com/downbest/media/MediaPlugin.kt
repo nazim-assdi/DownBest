@@ -249,6 +249,8 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--fragment-retries", "4")
                     .addOption("--extractor-retries", "2")
                     .addOption("--file-access-retries", "2")
+                    .addOption("--concurrent-fragments", args.concurrency.coerceIn(1, 16).toString())
+                    .addOption("--buffer-size", "16K")
                     .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
 
                 addJavascriptRuntime(request)
@@ -277,6 +279,10 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 request.addOption("-f", selectedFormat)
 
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
+                val progressSpeedLock = Any()
+                var lastProgressBytes = 0L
+                var lastProgressAtNanos = System.nanoTime()
+                var smoothedSpeedBytesPerSecond = 0L
                 val future = YtDlp.executeAsync(request, DownloadProgressCallback { progress, eta, line ->
                     val progressLine = line ?: ""
                     val payload = JSObject()
@@ -298,6 +304,28 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                         (parsedTotal * progress / 100.0).toLong().coerceAtLeast(0L)
                     } else diskBytes
                     payload.put("downloadedBytes", downloadedBytes)
+                    val nowNanos = System.nanoTime()
+                    val sampledSpeed = synchronized(progressSpeedLock) {
+                        val elapsedNanos = nowNanos - lastProgressAtNanos
+                        if (elapsedNanos >= 150_000_000L && downloadedBytes > lastProgressBytes) {
+                            val elapsedSeconds = elapsedNanos / 1_000_000_000.0
+                            val instantSpeed = ((downloadedBytes - lastProgressBytes) / elapsedSeconds).toLong()
+                            smoothedSpeedBytesPerSecond = if (smoothedSpeedBytesPerSecond == 0L) {
+                                instantSpeed
+                            } else {
+                                (smoothedSpeedBytesPerSecond * 0.35 + instantSpeed * 0.65).toLong()
+                            }
+                            lastProgressBytes = downloadedBytes
+                            lastProgressAtNanos = nowNanos
+                        } else if (elapsedNanos >= 2_000_000_000L) {
+                            smoothedSpeedBytesPerSecond = 0L
+                            lastProgressBytes = downloadedBytes
+                            lastProgressAtNanos = nowNanos
+                        }
+                        smoothedSpeedBytesPerSecond
+                    }
+                    val speedBytesPerSecond = parseSpeedBytesPerSecond(progressLine) ?: sampledSpeed
+                    payload.put("speedBytesSec", speedBytesPerSecond)
                     val estimatedTotal = parsedTotal ?: if (progress > 0.0 && downloadedBytes > 0L) {
                         (downloadedBytes * 100.0 / progress).toLong()
                     } else null
@@ -386,20 +414,29 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         val match = Regex("""(?:of\s+)(?:~)?([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B)""", RegexOption.IGNORE_CASE)
             .find(line) ?: return null
         val amount = match.groupValues[1].toDoubleOrNull() ?: return null
-        val unit = match.groupValues[2].uppercase()
-        val factor = when (unit) {
-            "B" -> 1.0
-            "KB" -> 1_000.0
-            "MB" -> 1_000_000.0
-            "GB" -> 1_000_000_000.0
-            "TB" -> 1_000_000_000_000.0
-            "KIB" -> 1024.0
-            "MIB" -> 1024.0 * 1024.0
-            "GIB" -> 1024.0 * 1024.0 * 1024.0
-            "TIB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
-            else -> return null
-        }
+        val factor = byteUnitFactor(match.groupValues[2]) ?: return null
         return (amount * factor).toLong().takeIf { it > 0L }
+    }
+
+    private fun parseSpeedBytesPerSecond(line: String): Long? {
+        val match = Regex("""(?:at\s+)?([0-9]+(?:\.[0-9]+)?)\s*([KMGT]?i?B)/s\b""", RegexOption.IGNORE_CASE)
+            .find(line) ?: return null
+        val amount = match.groupValues[1].toDoubleOrNull() ?: return null
+        val factor = byteUnitFactor(match.groupValues[2]) ?: return null
+        return (amount * factor).toLong().takeIf { it > 0L }
+    }
+
+    private fun byteUnitFactor(rawUnit: String): Double? = when (rawUnit.uppercase()) {
+        "B" -> 1.0
+        "KB" -> 1_000.0
+        "MB" -> 1_000_000.0
+        "GB" -> 1_000_000_000.0
+        "TB" -> 1_000_000_000_000.0
+        "KIB" -> 1024.0
+        "MIB" -> 1024.0 * 1024.0
+        "GIB" -> 1024.0 * 1024.0 * 1024.0
+        "TIB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+        else -> null
     }
 
     private fun shellQuote(value: String): String =
