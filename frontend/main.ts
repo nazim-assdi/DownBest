@@ -499,7 +499,7 @@ async function autoProcessPastedLinks() {
       const shouldInspect = !!mediaSourceLabel(url) || isMediaStreamUrl(url) || !isDirectFileUrl(url);
       if (shouldInspect) {
         try {
-          updateAutoStatus("Analyzing…", "working");
+          if (!mediaAnalyzing) updateAutoStatus("Analyzing…", "working");
           const result = await invoke<MediaAnalysis>("analyze_media", { url });
           if (!result.entries.length) throw new Error("No downloadable media items were found.");
           analyses.push(result);
