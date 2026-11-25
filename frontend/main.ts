@@ -351,7 +351,7 @@ applyPreferences();
 function updateUrlCount() {
   const content = document.querySelector<HTMLTextAreaElement>("#urls")!.value;
   const count = content.split(/\r?\n/).map(line => line.trim()).filter(Boolean).length;
-  document.querySelector("#url-count")!.textContent = count + (count === 1 ? " link detected" : " links detected");
+  document.querySelector("#url-count")!.textContent = String(count);
 }
 
 function normalizedLink(raw: string): string {
@@ -413,9 +413,11 @@ function isMediaStreamUrl(raw: string): boolean {
 }
 function updateAutoStatus(message: string, state = "") {
   const status = document.querySelector<HTMLElement>("#auto-status");
-  if (!status) return;
+  const wrap = document.querySelector<HTMLElement>("#auto-status-wrap");
+  if (!status || !wrap) return;
   status.textContent = message;
   status.dataset.state = state;
+  wrap.hidden = !message;
 }
 async function startDirectDownload(url: string): Promise<void> {
   const destination = document.querySelector<HTMLInputElement>("#destination")!.value.trim();
@@ -488,7 +490,7 @@ async function autoProcessPastedLinks() {
   } else {
     mediaSection.hidden = true;
     mediaError.hidden = true;
-    updateAutoStatus("Checking link type…", "working");
+    updateAutoStatus("Checking…", "working");
   }
   try {
     for (const url of candidates) {
@@ -497,7 +499,7 @@ async function autoProcessPastedLinks() {
       const shouldInspect = !!mediaSourceLabel(url) || isMediaStreamUrl(url) || !isDirectFileUrl(url);
       if (shouldInspect) {
         try {
-          updateAutoStatus("Analyzing " + new URL(url).hostname + "…", "working");
+          updateAutoStatus("Analyzing…", "working");
           const result = await invoke<MediaAnalysis>("analyze_media", { url });
           if (!result.entries.length) throw new Error("No downloadable media items were found.");
           analyses.push(result);
@@ -518,7 +520,7 @@ async function autoProcessPastedLinks() {
         }
       }
       try {
-        updateAutoStatus("Direct file detected · adding download…", "working");
+        updateAutoStatus("Adding…", "working");
         await startDirectDownload(url);
         queued += 1;
         succeeded.add(key);
@@ -576,7 +578,7 @@ async function autoProcessPastedLinks() {
     if (queued) {
       await refreshDownloads();
       scheduleRefresh(120);
-      toast(queued + (queued === 1 ? " direct download started." : " direct downloads started."));
+      toast(queued + " started.");
     }
     if (succeeded.size && input.value === snapshot) {
       input.value = snapshot.split(/\r?\n/)
@@ -585,16 +587,16 @@ async function autoProcessPastedLinks() {
       updateUrlCount();
     }
     if (analyses.length) {
-      updateAutoStatus(analyses.length + " media source(s) ready · choose items and press Download.", "success");
-      toast(mediaAnalysis!.entries.length + " media item(s) ready in the Media Library.");
+      updateAutoStatus("", "");
+      toast(mediaAnalysis!.entries.length + " ready.");
     } else if (mediaErrors.length) {
       // The Media Library already displays the error; avoid a duplicate toast and status message.
-      if (!mediaAnalyzing) updateAutoStatus("Link unavailable", "error");
+      if (!mediaAnalyzing) updateAutoStatus("", "");
     } else if (queued) {
-      updateAutoStatus("Download started · live progress is shown in Transfer Activity.", "success");
+      updateAutoStatus("", "");
     }
   } catch (problem) {
-    updateAutoStatus("Link processing failed · " + String(problem), "error");
+    updateAutoStatus("", "");
     toast(String(problem), true);
   } finally {
     mediaAnalyzing = false;
@@ -724,7 +726,7 @@ function renderMediaResolutionOptions(formats: MediaFormat[]) {
 async function downloadSelectedMedia() {
   if (!mediaAnalysis) return;
   const indices = selectedMediaIndices();
-  if (!indices.length) { toast("Select at least one video first.", true); return; }
+  if (!indices.length) { toast("Select videos first.", true); return; }
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media")!;
   const audioOnly = document.querySelector<HTMLSelectElement>("#media-quality-select")!.value === "audio";
   const formatSelector = audioOnly ? "audio" : (document.querySelector<HTMLSelectElement>("#media-resolution-select")!.value || null);
@@ -754,8 +756,7 @@ async function downloadSelectedMedia() {
       await refreshDownloads();
       button.textContent = "Queued " + added + " / " + indices.length;
     }
-    toast(added + " video(s) added to the download queue" +
-      (failed ? " · " + failed + " could not be queued" : "") + ".");
+    toast(added + " added" + (failed ? " · " + failed + " failed" : "") + ".");
     scheduleRefresh(100);
   } catch (problem) {
     toast(String(problem), true);
@@ -784,7 +785,7 @@ document.querySelector("#choose-folder")!.addEventListener("click", async () => 
     const selected = await openDialog({ directory: true, multiple: false, title: "Choose download folder" });
     if (typeof selected === "string") {
       document.querySelector<HTMLInputElement>("#destination")!.value = selected;
-      toast("Download folder selected.");
+      toast("Folder selected.");
     }
   } catch (error) {
     toast("Folder selection is unavailable: " + String(error), true);
@@ -797,7 +798,7 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
   if (pause) {
     try {
       await invoke("pause_download", { id: pause.dataset.pause });
-      toast("Pausing safely · partial data will be kept.");
+      toast("Paused.");
       await refreshDownloads();
     } catch (error) { toast(String(error), true); }
     return;
@@ -807,7 +808,7 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
     cancel.disabled = true;
     try {
       await invoke("cancel_download", { id: cancel.dataset.cancel });
-      toast("Download cancelled · incomplete files will be removed.");
+      toast("Cancelled.");
       await refreshDownloads();
       scheduleRefresh(100);
     } catch (error) {
@@ -820,7 +821,7 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
   if (resume) {
     try {
       await invoke("resume_download", { id: resume.dataset.resume });
-      toast("Resuming from saved progress.");
+      toast("Resuming…");
       await refreshDownloads();
       scheduleRefresh(100);
     } catch (error) { toast(String(error), true); }
@@ -857,7 +858,7 @@ document.querySelector("#clear")!.addEventListener("click", async () => {
   try {
     await invoke("clear_finished");
     await refreshDownloads();
-    toast("Completed and failed items cleared.");
+    toast("Finished items cleared.");
   } catch (error) { toast(String(error), true); }
 });
 document.addEventListener("visibilitychange", () => {
@@ -870,8 +871,8 @@ document.addEventListener("visibilitychange", () => {
 void Promise.all([
   refreshDownloads(),
   invoke<string>("default_save_location").then(location => {
-    const note = document.querySelector<HTMLElement>("#save-location-note");
-    if (note) note.textContent = location + " Pause keeps partial data. Resume only starts when you press it; Cancel deletes unfinished files.";
+    const destination = document.querySelector<HTMLInputElement>("#destination");
+    if (destination) destination.placeholder = location;
   }).catch(() => {}),
   invoke<boolean>("supports_folder_picker").then(supported => {
     desktopFileActions = supported;
