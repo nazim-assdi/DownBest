@@ -93,7 +93,7 @@ root.innerHTML = [
   '<div class="fields">',
   '<div><label for="concurrency">SPEED</label><select id="concurrency"><option value="2">Low · 2 connections</option><option value="4">Balanced · 4 connections</option><option value="8" selected>Fast · 8 connections</option><option value="16">Max · 16 connections</option></select></div>',
   '<div class="destination"><label for="destination">SAVE TO</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Downloads"><button id="choose-folder" type="button">Browse</button></div></div></div>',
-  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><h2 id="media-title">Media</h2><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-preview-row"><div id="media-preview-thumb" class="media-preview-thumb"><span>▶</span></div><div class="media-quality media-quality-inline"><label for="media-quality-select">MODE<select id="media-quality-select"><option value="">Video + audio</option><option value="audio">Audio</option></select></label><label for="media-resolution-select">RESOLUTION<select id="media-resolution-select" disabled><option value="">Auto · best available</option></select></label></div></div><div class="media-library-controls"><div class="media-select-tools"><span id="media-entry-count">0 items</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
+  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><h2 id="media-title">Media</h2><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-preview-row"><div id="media-preview-thumb" class="media-preview-thumb"><span>▶</span></div><div class="media-quality media-quality-inline"><label for="media-quality-select">MODE<select id="media-quality-select"><option value="">Video + audio</option><option value="audio">Audio</option></select></label><label for="media-resolution-select">RESOLUTION<select id="media-resolution-select" disabled><option value="">Auto</option></select></label></div></div><div class="media-library-controls"><div class="media-select-tools"><span id="media-entry-count">0 items</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
 
   '<section class="queue"><div class="queue-head"><h2>Queue <i id="queue-count">0</i></h2><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
@@ -577,7 +577,7 @@ async function autoProcessPastedLinks() {
     if (queued) {
       await refreshDownloads();
       scheduleRefresh(120);
-      toast(queued + " started.");
+      toast("Started " + queued + " downloads.");
     }
     if (succeeded.size && input.value === snapshot) {
       input.value = snapshot.split(/\r?\n/)
@@ -679,10 +679,10 @@ function renderMediaLibrary() {
   preview.innerHTML = mediaImage(previewUrl) || '<span class="media-thumb-placeholder">▶</span>';
   const quality = document.querySelector<HTMLSelectElement>("#media-quality-select")!;
   const previous = quality.value;
-  quality.innerHTML = '<option value="">Default · best available</option><option value="audio">Audio only</option>';
+  quality.innerHTML = '<option value="">Video + audio</option><option value="audio">Audio</option>';
   if (previous === "audio") quality.value = previous;
   const resolution = document.querySelector<HTMLSelectElement>("#media-resolution-select")!;
-  resolution.innerHTML = '<option value="">Auto · best available</option>';
+  resolution.innerHTML = '<option value="">Auto</option>';
   resolution.value = "";
   resolution.disabled = true;
   error.hidden = true;
@@ -717,7 +717,7 @@ function renderMediaResolutionOptions(formats: MediaFormat[]) {
     })
     .filter(height => Number.isFinite(height) && height >= 144)))
     .sort((a, b) => b - a);
-  select.innerHTML = '<option value="">Auto · best available</option>' +
+  select.innerHTML = '<option value="">Auto</option>' +
     heights.map(height => '<option value="max-height-' + height + '">Up to ' + height + 'p</option>').join("");
   select.disabled = heights.length === 0 || mediaAnalyzing;
 }
