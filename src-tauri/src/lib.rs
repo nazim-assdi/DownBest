@@ -524,6 +524,89 @@ fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
     }
 }
 
+fn parse_human_byte_count(raw: &str) -> Option<u64> {
+    let value = raw.trim().trim_start_matches('~').replace(',', "");
+    let number_end = value.find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))?;
+    let number = value[..number_end].parse::<f64>().ok()?;
+    if !number.is_finite() || number < 0.0 { return None; }
+    let unit = value[number_end..].trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" | "b" => 1.0,
+        "kib" => 1024.0,
+        "mib" => 1024.0_f64.powi(2),
+        "gib" => 1024.0_f64.powi(3),
+        "tib" => 1024.0_f64.powi(4),
+        "kb" => 1000.0,
+        "mb" => 1000.0_f64.powi(2),
+        "gb" => 1000.0_f64.powi(3),
+        "tb" => 1000.0_f64.powi(4),
+        _ => return None,
+    };
+    Some((number * multiplier).round().min(u64::MAX as f64) as u64)
+}
+
+// yt-dlp's custom progress template can be buffered by Windows when its output
+// is captured without a console. Parse the normal --newline progress line too,
+// so the desktop queue remains live even when the custom marker arrives late.
+fn parse_yt_dlp_progress_line(line: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
+    let download = line.find("[download]")?;
+    let progress_line = &line[download + "[download]".len()..];
+    let percent_end = progress_line.find('%')?;
+    let percent = progress_line[..percent_end].split_whitespace().last()?
+        .parse::<f64>().ok()?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return None;
+    }
+
+    let after_percent = &progress_line[percent_end + 1..];
+    let total = after_percent.split_once("of ")
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .and_then(parse_human_byte_count);
+    let downloaded = total.map(|bytes| {
+        (bytes as f64 * percent / 100.0).round().clamp(0.0, bytes as f64) as u64
+    });
+    let speed = progress_line.rsplit_once(" at ")
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .and_then(|value| value.strip_suffix("/s"))
+        .and_then(parse_human_byte_count);
+    if downloaded.is_none() && total.is_none() && speed.is_none() {
+        None
+    } else {
+        Some((downloaded, total, speed))
+    }
+}
+
+fn update_media_progress_from_line(manager: &DownloadManager, id: &str, line: &str) {
+    if let Some(index) = line.find("__DOWNBEST__") {
+        update_media_progress(manager, id, &line[index + "__DOWNBEST__".len()..]);
+        return;
+    }
+    if let Some((downloaded, total, speed)) = parse_yt_dlp_progress_line(line) {
+        if let Ok(mut records) = manager.records.lock() {
+            if let Some(record) = records.get_mut(id) {
+                if let Some(value) = downloaded {
+                    record.downloaded.store(value, Ordering::Relaxed);
+                }
+                if let Some(value) = total {
+                    record.total = Some(value);
+                }
+                if let Some(value) = speed {
+                    record.speed_bytes_sec = value;
+                }
+                if downloaded.unwrap_or(0) > 0 || speed.unwrap_or(0) > 0 {
+                    if record.status != "Downloading" {
+                        record.started = Instant::now();
+                    }
+                    record.status = "Downloading".into();
+                    record.media_activity = Some("Downloading media".into());
+                    record.error = None;
+                }
+            }
+        }
+    }
+    set_media_activity_from_line(manager, id, line);
+}
+
 fn progress_counter(manager: &DownloadManager, id: &str) -> Result<Arc<AtomicU64>, String> {
     let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
     records.get(id).map(|record| record.downloaded.clone())
@@ -2217,6 +2300,7 @@ async fn run_media_download(
         .arg("-N").arg(concurrency.to_string())
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
         .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s")
+        .arg("--progress-delta").arg("0.5")
         .arg("--print").arg("before_dl:__DOWNBEST_TITLE__%(title)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
         .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
@@ -2240,7 +2324,7 @@ async fn run_media_download(
         // handles DASH/HLS fragments so fragment scheduling remains protocol-aware.
         command.arg("--downloader").arg("aria2c")
             .arg("--downloader").arg("dash,m3u8:native")
-            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 4M", concurrency.clamp(2, 16), concurrency.clamp(2, 16)));
+            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 1M", concurrency.clamp(2, 16), concurrency.clamp(2, 16)));
         if let Some(parent) = aria_path.parent() {
             let mut paths = vec![parent.to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
@@ -2271,6 +2355,7 @@ async fn run_media_download(
                     set_file_path(&stdout_manager, &stdout_id, Path::new(value));
                 }
             }
+            update_media_progress_from_line(&stdout_manager, &stdout_id, &line);
         }
     });
 
@@ -2280,12 +2365,7 @@ async fn run_media_download(
         let mut lines = BufReader::new(stderr).lines();
         let mut captured = String::new();
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(index) = line.find("__DOWNBEST__") {
-                let data = &line[index + "__DOWNBEST__".len()..];
-                update_media_progress(&progress_manager, &progress_id, data);
-            } else {
-                set_media_activity_from_line(&progress_manager, &progress_id, &line);
-            }
+            update_media_progress_from_line(&progress_manager, &progress_id, &line);
             captured.push_str(&line);
             captured.push('\n');
             if captured.len() > 16_000 {
@@ -2825,6 +2905,23 @@ mod lite_mode_tests {
         assert_eq!(updated.speed_bytes_sec, 1537);
         assert_eq!(updated.status, "Downloading");
         assert_eq!(updated.media_activity.as_deref(), Some("Downloading media"));
+    }
+
+    #[test]
+    fn parses_standard_yt_dlp_progress_lines_for_desktop_live_updates() {
+        let parsed = super::parse_yt_dlp_progress_line(
+            "[download]  25.0% of 100.00MiB at 2.50MiB/s ETA 00:30"
+        ).expect("parse a standard yt-dlp progress line");
+        assert_eq!(parsed.0, Some(25 * 1024 * 1024));
+        assert_eq!(parsed.1, Some(100 * 1024 * 1024));
+        assert_eq!(parsed.2, Some(2_621_440));
+
+        let final_line = super::parse_yt_dlp_progress_line(
+            "[download] 100% of 1.00MB in 00:01 at 1.00MB/s"
+        ).expect("parse a final yt-dlp progress line");
+        assert_eq!(final_line.0, Some(1_000_000));
+        assert_eq!(final_line.1, Some(1_000_000));
+        assert_eq!(final_line.2, Some(1_000_000));
     }
 
     #[test]
