@@ -362,12 +362,20 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
         .map(|n| (downloaded as f64 / n as f64 * 100.0).clamp(0.0, 100.0)).unwrap_or(0.0);
     let progress = record.progress_override.unwrap_or(calculated);
     let elapsed = record.started.elapsed().as_secs_f64().max(0.5);
+    let is_media_transfer = record.media_activity.is_some() || record.media_title.is_some();
+    let average_speed = (downloaded as f64 / elapsed) as u64;
     DownloadView {
         id: record.id.clone(), url: record.url.clone(), file_name: record.file_name.clone(),
         kind: record.kind.clone(), status: record.status.clone(), destination: record.destination.clone(),
         file_path: record.file_path.clone(), downloaded_bytes: downloaded, total_bytes: record.total,
         speed_bytes_sec: if matches!(record.status.as_str(), "Downloading" | "Extracting media") {
-            record.speed_bytes_sec.max((downloaded as f64 / elapsed) as u64)
+            if record.speed_bytes_sec > 0 {
+                record.speed_bytes_sec
+            } else if is_media_transfer {
+                0
+            } else {
+                average_speed
+            }
         } else { 0 },
         progress, error: record.error.clone(),
         media_title: record.media_title.clone(),
