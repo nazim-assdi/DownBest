@@ -593,7 +593,17 @@ async function autoProcessPastedLinks() {
       if (mediaErrors.length) {
         section.hidden = false;
         error.hidden = false;
-        error.textContent = mediaErrors.join(" · ");
+        const rawError = mediaErrors.join(" · ");
+        const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
+        document.querySelector<HTMLElement>("#media-title")!.textContent =
+          denied ? "YouTube refused this request" : "Media could not be analyzed";
+        document.querySelector<HTMLElement>("#media-subtitle")!.textContent =
+          denied
+            ? "The source rejected the request. Try again shortly or test another public video."
+            : "The source could not provide video details. Check the link and try again.";
+        error.textContent = denied
+          ? "HTTP 403 · The video service refused this request. This can depend on the selected player stream, video restrictions, or the current network."
+          : rawError;
       } else {
         section.hidden = true;
         error.hidden = true;
