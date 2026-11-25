@@ -508,16 +508,15 @@ async function autoProcessPastedLinks() {
   mediaFormats = [];
   if (mediaAnalyzing) {
     mediaSection.hidden = false;
-    mediaError.hidden = false;
-    mediaError.textContent = "Checking media details and available videos…";
+    mediaError.hidden = true;
+    mediaError.textContent = "";
     document.querySelector<HTMLDivElement>("#media-entry-list")!.innerHTML = "";
-    document.querySelector<HTMLElement>("#media-title")!.textContent = "Analyzing media…";
-    document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "Fetching source information and available formats";
+    document.querySelector<HTMLElement>("#media-title")!.textContent = "Analyzing…";
+    document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "";
     document.querySelector<HTMLDivElement>("#media-preview-thumb")!.innerHTML = "<span>▶</span>";
     document.querySelector<HTMLButtonElement>("#download-selected-media")!.disabled = true;
     document.querySelector<HTMLElement>("#media-entry-count")!.textContent = "Analyzing…";
-    document.querySelector<HTMLElement>("#media-selection-summary")!.textContent = "Please wait…";
-    updateAutoStatus("Recognizing media link…", "working");
+    document.querySelector<HTMLElement>("#media-selection-summary")!.textContent = "";
   } else {
     mediaSection.hidden = true;
     mediaError.hidden = true;
@@ -595,15 +594,9 @@ async function autoProcessPastedLinks() {
         error.hidden = false;
         const rawError = mediaErrors.join(" · ");
         const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
-        document.querySelector<HTMLElement>("#media-title")!.textContent =
-          denied ? "YouTube refused this request" : "Media could not be analyzed";
-        document.querySelector<HTMLElement>("#media-subtitle")!.textContent =
-          denied
-            ? "The source rejected the request. Try again shortly or test another public video."
-            : "The source could not provide video details. Check the link and try again.";
-        error.textContent = denied
-          ? "HTTP 403 · The video service refused this request. This can depend on the selected player stream, video restrictions, or the current network."
-          : rawError;
+        document.querySelector<HTMLElement>("#media-title")!.textContent = "Unavailable";
+        document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "";
+        error.textContent = denied ? "HTTP 403 · YouTube blocked this request." : "Could not analyze this media link.";
       } else {
         section.hidden = true;
         error.hidden = true;
@@ -628,8 +621,8 @@ async function autoProcessPastedLinks() {
       updateAutoStatus(analyses.length + " media source(s) ready · choose items and press Download.", "success");
       toast(mediaAnalysis!.entries.length + " media item(s) ready in the Media Library.");
     } else if (mediaErrors.length) {
-      updateAutoStatus("Could not process the link · check the message above and try again.", "error");
-      toast(mediaErrors[0], true);
+      // The Media Library already displays the error; avoid a duplicate toast and status message.
+      if (!mediaAnalyzing) updateAutoStatus("Link unavailable", "error");
     } else if (queued) {
       updateAutoStatus("Download started · live progress is shown in Transfer Activity.", "success");
     }
