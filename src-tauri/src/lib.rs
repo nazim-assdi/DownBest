@@ -2828,6 +2828,21 @@ mod lite_mode_tests {
     }
 
     #[test]
+    fn live_media_speed_uses_current_rate_not_lifetime_average() {
+        let mut record = queued_record("live-media-speed");
+        record.status = "Downloading".into();
+        record.started = Instant::now() - std::time::Duration::from_secs(10);
+        record.downloaded.store(20_000_000, Ordering::Relaxed);
+        record.media_activity = Some("Downloading media".into());
+        record.speed_bytes_sec = 1_000;
+
+        assert_eq!(super::view_of(&record).speed_bytes_sec, 1_000);
+
+        record.speed_bytes_sec = 0;
+        assert_eq!(super::view_of(&record).speed_bytes_sec, 0);
+    }
+
+    #[test]
     fn cancelled_job_remains_cancelled_after_queue_restore() {
         let root = std::env::temp_dir().join(format!("downbest-cancel-restore-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&root).expect("create cancellation restore folder");
