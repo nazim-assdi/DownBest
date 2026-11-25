@@ -119,6 +119,7 @@ function isApplicationOrDocumentDownload(download: Download): boolean {
 function renderDownloads() {
   const list = document.querySelector<HTMLDivElement>("#download-list")!;
   const active = downloads.filter(d => !finalStatus(d.status));
+  const completed = downloads.filter(d => d.status === "Completed");
   const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled" || d.status === "Paused");
   document.querySelector("#active-count")!.textContent = String(active.length);
   document.querySelector("#queue-count")!.textContent = String(downloads.length);
@@ -139,9 +140,8 @@ function renderDownloads() {
   visible.sort((a, b) => rank(a) - rank(b));
 
   if (!visible.length) {
-    const emptyTitle = downloads.length ? "Nothing in this view" : "Your queue is ready";
-    const emptyText = downloads.length ? "Try another filter or search term." : "Paste one or more links above to start downloading.";
-    list.innerHTML = '<div class="empty"><div>' + icons.download + '</div><b>' + emptyTitle + '</b><p>' + emptyText + '</p></div>';
+    const emptyTitle = downloads.length ? "No downloads" : "No downloads yet";
+    list.innerHTML = '<div class="empty"><div>' + icons.download + '</div><b>' + emptyTitle + '</b></div>';
     return;
   }
 
@@ -159,12 +159,11 @@ function renderDownloads() {
       : '<div class="file-icon">' + (done ? icons.check : icons.file) + '</div>';
     const displayName = mediaTitle || d.file_name || d.url;
     const mediaHeading = '<div class="download-heading"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
-      (mediaTitle ? '<span class="media-type-tag">VIDEO</span>' : '') + '</div>';
+      '' + '</div>';
     const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
       paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
-    const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
-      d.status === "Extracting media" ? (mediaTitle ? "Preparing video" : (d.media_activity || "Preparing download")) :
-      d.status === "Retrying" ? "Auto retrying" :
+    const statusLabel = d.status === "Extracting media" ? "Preparing" :
+      d.status === "Retrying" ? "Retrying" :
       d.status === "Connecting" ? "Connecting" :
       d.status === "Cancelling" ? "Cancelling" :
       d.status === "Pausing" ? "Pausing" : d.status;
@@ -179,15 +178,15 @@ function renderDownloads() {
     const sourceLabel = mediaTitle ? (mediaSourceLabel(d.url) || "MEDIA VIDEO") : sourceHost || "DIRECT DOWNLOAD";
     const receivedLabel = d.total_bytes
       ? bytes(d.downloaded_bytes) + " / " + bytes(d.total_bytes)
-      : bytes(d.downloaded_bytes) + " received";
+      : bytes(d.downloaded_bytes);
     const etaLabel = !done && !paused && !finalStatus(d.status)
-      ? (etaText ? etaText + " left" : d.status === "Downloading" ? "Calculating…" : "")
+      ? etaText
       : "";
     const unknownLength = !d.total_bytes && pct <= 0 && !done;
     const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
       d.status === "Retrying" || (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
     const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
-      d.status === "Extracting media" ? (mediaTitle ? "PREPARING" : "FETCHING") : d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
+      done ? "100%" : "—";
     const bar = done ? 100 : pct;
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const output = done && d.file_path
