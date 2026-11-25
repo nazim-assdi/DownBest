@@ -199,19 +199,19 @@ function renderDownloads() {
     const action = !finalStatus(d.status)
       ? d.status === "Cancelling" || d.status === "Pausing"
         ? '<span class="stopping-label">' + (d.status === "Cancelling" ? "Cancelling…" : "Pausing…") + '</span>'
-        : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel and delete incomplete files">Cancel</button></div>'
+        : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel">Cancel</button></div>'
       : isPublicMobileFile
         ? '<button class="open-button" data-open="' + safe(d.id) + '">' + icons.external + '<span>Open file</span></button>'
         : done && d.file_path && desktopFileActions
           ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
           : paused
-            ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Continue from saved progress">' + icons.refresh + '<span>Resume</span></button>'
+            ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Resume">' + icons.refresh + '<span>Resume</span></button>'
             : failedItem
-              ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry this failed download">' + icons.refresh + '<span>Retry</span></button>'
+              ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry">' + icons.refresh + '<span>Retry</span></button>'
               : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
     const transferMeta = '<div class="download-meta">' +
       '<span class="download-meta-item"><small>SIZE</small><b>' + safe(receivedLabel) + '</b></span>' +
-      '<span class="download-meta-item speed-meta"><small>' + (done ? "RESULT" : "SPEED") + '</small><b>' + safe(done ? "Saved" : speed) + '</b></span>' +
+      (!done ? '<span class="download-meta-item speed-meta"><small>SPEED</small><b>' + safe(speed) + '</b></span>' : '') +
       (etaLabel ? '<span class="download-meta-item eta-meta"><small>ETA</small><b>' + safe(etaLabel) + '</b></span>' : '') +
       '</div>';
     return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' +
