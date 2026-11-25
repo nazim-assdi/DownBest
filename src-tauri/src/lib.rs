@@ -474,6 +474,7 @@ fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &
             if let Some(total) = progress.total_bytes.filter(|value| *value > 0) {
                 record.total = Some(total);
             }
+            record.speed_bytes_sec = progress.speed_bytes_sec;
             record.progress_override = Some(progress.progress.clamp(0.0, 100.0));
             if let Some(activity) = media_activity_from_line(&progress.line) {
                 record.media_activity = Some(activity.to_string());
@@ -2627,7 +2628,7 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::{cleanup_cancelled_files, download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
+    use super::{cleanup_cancelled_files, download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, update_media_progress, unique_path, DownloadManager, DownloadRecord};
     use reqwest::{header, Client};
     use std::{io::{Read, Write}, net::TcpListener, path::PathBuf, sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
