@@ -192,10 +192,10 @@ function renderDownloads() {
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const output = done && d.file_path
       ? isPublicMobileFile
-        ? '<div class="output-path"><span>' + icons.folder + '</span><span>Saved to your phone’s Downloads folder</span></div>'
+        ? '<div class="output-path"><span>' + icons.folder + '</span><span>Saved to Downloads</span></div>'
         : desktopFileActions
           ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
-          : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
+          : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved</span></div>'
       : "";
     const action = !finalStatus(d.status)
       ? d.status === "Cancelling" || d.status === "Pausing"
@@ -481,7 +481,6 @@ async function autoProcessPastedLinks() {
     mediaError.textContent = "";
     document.querySelector<HTMLDivElement>("#media-entry-list")!.innerHTML = "";
     document.querySelector<HTMLElement>("#media-title")!.textContent = "Analyzing…";
-    document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "";
     document.querySelector<HTMLDivElement>("#media-preview-thumb")!.innerHTML = "<span>▶</span>";
     document.querySelector<HTMLButtonElement>("#download-selected-media")!.disabled = true;
     document.querySelector<HTMLElement>("#media-entry-count")!.textContent = "Analyzing…";
@@ -564,8 +563,7 @@ async function autoProcessPastedLinks() {
         const rawError = mediaErrors.join(" · ");
         const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
         document.querySelector<HTMLElement>("#media-title")!.textContent = "Unavailable";
-        document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "";
-        error.textContent = denied ? "HTTP 403 · YouTube blocked this request." : "Could not analyze this media link.";
+            error.textContent = denied ? "HTTP 403 · YouTube blocked this request." : "Could not analyze this media link.";
       } else {
         section.hidden = true;
         error.hidden = true;
@@ -622,8 +620,7 @@ urlInput.addEventListener("paste", event => {
   window.setTimeout(() => scheduleAutoProcess(90), 35);
 });
 
-function mediaDuration(seconds: number | null): string {
-  if (seconds === null || !Number.isFinite(seconds)) return "Duration unavailable";
+function mediaDuration(seconds: number): string {
   return formatTime(seconds);
 }
 function mediaImage(url: string | null): string {
@@ -661,20 +658,9 @@ function updateMediaSelection() {
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media");
   const quality = document.querySelector<HTMLSelectElement>("#media-quality-select");
   const resolution = document.querySelector<HTMLSelectElement>("#media-resolution-select");
-  const chosenMode = quality?.value === "audio" ? "Audio only" : "Default · best video + audio";
-  if (label) label.textContent = count + " of " + total + " selected · " + chosenMode;
-  if (counter) counter.textContent = total + " media item" + (total === 1 ? "" : "s") + " found";
-  const summary = document.querySelector<HTMLElement>("#media-format-summary");
-  if (summary) summary.textContent = quality?.value === "audio"
-    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
-    : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
+  if (label) label.textContent = count + " selected";
+  if (counter) counter.textContent = total + " items";
   if (resolution) resolution.disabled = mediaAnalyzing || quality?.value === "audio" || resolution.options.length <= 1;
-  const resolutionSummary = document.querySelector<HTMLElement>("#media-resolution-summary");
-  if (resolutionSummary) {
-    if (quality?.value === "audio") resolutionSummary.textContent = "Resolution is not used for audio-only downloads.";
-    else if (resolution?.value) resolutionSummary.textContent = "Maximum quality: " + (resolution.selectedOptions[0]?.textContent || "Selected resolution") + ". Lower quality may be used when the source has no matching stream.";
-    else if (mediaFormats.length) resolutionSummary.textContent = mediaFormats.length + " format(s) checked. Choose a maximum resolution or leave Auto for the best available.";
-  }
   if (button) {
     button.disabled = count === 0 || mediaAnalyzing;
     button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count + " selected";
@@ -686,17 +672,10 @@ function renderMediaLibrary() {
   if (!mediaAnalysis) { section.hidden = true; return; }
   section.hidden = false;
   const title = document.querySelector<HTMLElement>("#media-title")!;
-  const subtitle = document.querySelector<HTMLElement>("#media-subtitle")!;
   title.textContent = mediaAnalysis.title;
   const preview = document.querySelector<HTMLDivElement>("#media-preview-thumb")!;
   const previewUrl = mediaAnalysis.thumbnail || mediaAnalysis.entries[0]?.thumbnail || null;
   preview.innerHTML = mediaImage(previewUrl) || '<span class="media-thumb-placeholder">▶</span>';
-  subtitle.textContent = mediaAnalysis.extractor +
-    (mediaAnalysis.uploader ? " · " + mediaAnalysis.uploader : "") +
-    " · " + mediaAnalysis.entries.length + " item(s)" +
-    (mediaAnalysis.entryCount > mediaAnalysis.entries.length
-      ? " loaded of " + mediaAnalysis.entryCount
-      : "");
   const quality = document.querySelector<HTMLSelectElement>("#media-quality-select")!;
   const previous = quality.value;
   quality.innerHTML = '<option value="">Default · best available</option><option value="audio">Audio only</option>';
@@ -707,10 +686,6 @@ function renderMediaLibrary() {
   resolution.disabled = true;
   error.hidden = true;
   error.textContent = "";
-  const summary = document.querySelector<HTMLElement>("#media-format-summary")!;
-  summary.textContent = quality.value === "audio"
-    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded. Only the first item is selected initially."
-    : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
   const list = document.querySelector<HTMLDivElement>("#media-entry-list")!;
   list.innerHTML = mediaAnalysis.entries.map((entry, index) => {
     const thumbnail = mediaImage(entry.thumbnail);
@@ -724,8 +699,8 @@ function renderMediaLibrary() {
     return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-entry-thumb">' +
       (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
       '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' +
-      safe(entry.title) + '</b><small>' + safe(mediaDuration(entry.duration)) + ' · ' + safe(entry.id) +
-      '</small><small class="media-entry-state">' + state + '</small></span></label>';
+      safe(entry.title) + '</b>' + (entry.duration !== null && Number.isFinite(entry.duration) ? '<small>' + safe(mediaDuration(entry.duration)) + '</small>' : '') +
+      '<small class="media-entry-state">' + state + '</small></span></label>';
   }).join("");
   updateMediaSelection();
 }
@@ -744,10 +719,6 @@ function renderMediaResolutionOptions(formats: MediaFormat[]) {
   select.innerHTML = '<option value="">Auto · best available</option>' +
     heights.map(height => '<option value="max-height-' + height + '">Up to ' + height + 'p</option>').join("");
   select.disabled = heights.length === 0 || mediaAnalyzing;
-  const summary = document.querySelector<HTMLElement>("#media-resolution-summary");
-  if (summary) summary.textContent = heights.length
-    ? heights.length + " resolution level(s) found. Choose a maximum resolution; Auto selects the best available."
-    : "No selectable video resolution was returned. Auto mode will still try the best available stream.";
 }
 
 async function downloadSelectedMedia() {
