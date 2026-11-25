@@ -147,7 +147,7 @@ function renderDownloads() {
   }
 
   list.innerHTML = visible.map(d => {
-    const pct = Math.max(0, Math.min(100, d.progress || 0));
+    const pct = Math.max(0, Math.min(100, Number.isFinite(d.progress) ? d.progress : 0));
     const done = d.status === "Completed";
     const failedItem = d.status === "Failed";
     const cancelled = d.status === "Cancelled";
@@ -155,48 +155,53 @@ function renderDownloads() {
     const queued = d.status === "Queued";
     const isMediaItem = !!mediaSourceLabel(d.url) && !isApplicationOrDocumentDownload(d);
     const mediaTitle = isMediaItem ? (d.media_title?.trim() || "") : "";
-    const mediaVisual = mediaTitle
-      ? '<div class="download-media-thumb">' + (mediaImage(d.media_thumbnail) || '<span class="download-media-placeholder">▶</span>') + '<span class="download-media-play">▶</span></div>'
-      : '<div class="file-icon">' + (done ? icons.check : icons.file) + '</div>';
     const displayName = mediaTitle || d.file_name || d.url;
-    const mediaHeading = '<div class="download-heading"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
-      '' + '</div>';
-    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
-      paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
-    const statusLabel = d.status === "Extracting media" ? "Preparing" :
-      d.status === "Retrying" ? "Retrying" :
-      d.status === "Connecting" ? "Connecting" :
-      d.status === "Cancelling" ? "Cancelling" :
-      d.status === "Pausing" ? "Pausing" : d.status;
-    const measuredSpeed = d.speed_bytes_sec || liveSpeeds.get(d.id) || 0;
-    const etaText = d.total_bytes && measuredSpeed > 0
-      ? formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed)
-      : "";
-    const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" : "—";
-    const detail = failedItem ? safe(d.error || "Download failed") : "";
     let sourceHost = "";
     try { sourceHost = new URL(d.url).hostname.replace(/^www\./, ""); } catch { sourceHost = ""; }
-    const sourceLabel = mediaTitle ? (mediaSourceLabel(d.url) || "MEDIA VIDEO") : sourceHost || "DIRECT DOWNLOAD";
-    const receivedLabel = d.total_bytes
+    const sourceLabel = isMediaItem
+      ? (mediaSourceLabel(d.url) || sourceHost || "MEDIA")
+      : sourceHost || "FILE";
+    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
+      paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
+    const statusLabel = d.status === "Extracting media"
+      ? (d.media_activity || "Preparing")
+      : d.status === "Retrying" ? "Retrying"
+      : d.status === "Connecting" ? "Connecting"
+      : d.status === "Cancelling" ? "Cancelling"
+      : d.status === "Pausing" ? "Pausing"
+      : d.status === "Downloading" ? "Downloading"
+      : d.status;
+    const measuredSpeed = Math.max(0, d.speed_bytes_sec || liveSpeeds.get(d.id) || 0);
+    const activeNow = !finalStatus(d.status);
+    const speedLabel = measuredSpeed > 0
+      ? bytes(measuredSpeed) + "/s"
+      : queued ? "Waiting"
+      : paused ? "Paused"
+      : done ? "Complete"
+      : failedItem || cancelled ? "—"
+      : d.status === "Extracting media" ? "Preparing"
+      : "Calculating…";
+    const etaSeconds = d.total_bytes && measuredSpeed > 0
+      ? Math.max(0, (d.total_bytes - d.downloaded_bytes) / measuredSpeed)
+      : null;
+    const etaLabel = done ? "Complete"
+      : paused ? "Paused"
+      : etaSeconds !== null && Number.isFinite(etaSeconds) ? formatTime(etaSeconds)
+      : activeNow ? "Calculating…" : "—";
+    const sizeLabel = d.total_bytes
       ? bytes(d.downloaded_bytes) + " / " + bytes(d.total_bytes)
-      : bytes(d.downloaded_bytes);
-    const etaLabel = !done && !paused && !finalStatus(d.status)
-      ? etaText
-      : "";
-    const unknownLength = !d.total_bytes && pct <= 0 && !done;
-    const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
-      d.status === "Retrying" || (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
-    const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
-      done ? "100%" : "—";
-    const bar = done ? 100 : pct;
+      : bytes(d.downloaded_bytes) + " downloaded";
+    const progressKnown = d.total_bytes !== null || pct > 0 || done;
+    const progressLabel = done ? "100%" : progressKnown ? pct.toFixed(1) + "%" : statusLabel;
+    const indeterminate = activeNow && !done && (
+      ["Connecting", "Extracting media", "Retrying"].includes(d.status) ||
+      (!d.total_bytes && pct <= 0)
+    );
+    const barWidth = done ? 100 : progressKnown ? pct : 28;
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
-    const output = done && d.file_path
-      ? isPublicMobileFile
-        ? '<div class="output-path"><span>' + icons.folder + '</span><span>Saved to Downloads</span></div>'
-        : desktopFileActions
-          ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
-          : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved</span></div>'
-      : "";
+    const thumbnail = isMediaItem
+      ? (mediaImage(d.media_thumbnail) || '<span class="transfer-media-placeholder">▶</span>')
+      : '<span class="transfer-file-icon">' + (done ? icons.check : icons.file) + '</span>';
     const action = !finalStatus(d.status)
       ? d.status === "Cancelling" || d.status === "Pausing"
         ? '<span class="stopping-label">' + (d.status === "Cancelling" ? "Cancelling…" : "Pausing…") + '</span>'
@@ -210,22 +215,34 @@ function renderDownloads() {
             : failedItem
               ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry">' + icons.refresh + '<span>Retry</span></button>'
               : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
-    const transferMeta = '<div class="download-meta">' +
-      '<span class="download-meta-item"><small>SIZE</small><b>' + safe(receivedLabel) + '</b></span>' +
-      (!done ? '<span class="download-meta-item speed-meta"><small>SPEED</small><b>' + safe(speed) + '</b></span>' : '') +
-      (etaLabel ? '<span class="download-meta-item eta-meta"><small>ETA</small><b>' + safe(etaLabel) + '</b></span>' : '') +
-      '</div>';
-    return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' +
-      '<div class="download-card-visual">' + mediaVisual + '</div>' +
-      '<div class="download-body">' +
-        '<div class="download-card-heading"><div class="download-card-title">' + mediaHeading +
-          '<span class="download-source-label">' + safe(sourceLabel) + '</span></div>' +
-          '<span class="status ' + statusClass + '"><i></i>' + safe(statusLabel) + '</span></div>' +
-        (detail ? '<p class="download-card-message">' + detail + '</p>' : '') +
-        '<div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div>' +
-        transferMeta + output +
+    const output = done && d.file_path
+      ? '<div class="transfer-output" title="' + safe(d.file_path) + '">' + icons.folder +
+        '<span>' + safe(isPublicMobileFile ? "Saved to Downloads" : desktopFileActions ? d.file_path : "Saved") + '</span></div>'
+      : "";
+    const detail = failedItem ? '<div class="transfer-error">' + safe(d.error || "Download failed") + '</div>' : "";
+    return '<article class="transfer-card ' + statusClass + (isMediaItem ? ' transfer-media' : '') + '">' +
+      '<div class="transfer-card-head">' +
+        '<div class="transfer-identity">' +
+          '<div class="transfer-thumb ' + (isMediaItem ? 'is-media' : 'is-file') + '">' + thumbnail + '</div>' +
+          '<div class="transfer-info">' +
+            '<div class="transfer-title-row"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
+              '<span class="transfer-source">' + safe(sourceLabel) + '</span></div>' +
+            '<span class="transfer-url" title="' + safe(d.url) + '">' + safe(sourceHost || d.url) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<span class="transfer-status ' + statusClass + '"><i></i>' + safe(statusLabel) + '</span>' +
       '</div>' +
-      '<div class="download-card-action">' + action + '</div>' +
+      detail +
+      '<div class="transfer-progress-block">' +
+        '<div class="transfer-progress-top"><span>PROGRESS</span><b>' + safe(progressLabel) + '</b></div>' +
+        '<div class="transfer-progress-track' + (indeterminate ? ' is-indeterminate' : '') + '"><i style="width:' + barWidth.toFixed(1) + '%"></i></div>' +
+      '</div>' +
+      '<div class="transfer-metrics">' +
+        '<div class="transfer-metric transfer-speed"><span>SPEED</span><b>' + safe(speedLabel) + '</b></div>' +
+        '<div class="transfer-metric"><span>DOWNLOADED</span><b>' + safe(sizeLabel) + '</b></div>' +
+        '<div class="transfer-metric"><span>ETA</span><b>' + safe(etaLabel) + '</b></div>' +
+      '</div>' +
+      '<div class="transfer-card-foot">' + output + '<div class="transfer-actions">' + action + '</div></div>' +
       '</article>';
   }).join("");
 }
