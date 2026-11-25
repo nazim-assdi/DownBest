@@ -565,7 +565,7 @@ async function autoProcessPastedLinks() {
         const rawError = mediaErrors.join(" · ");
         const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
         document.querySelector<HTMLElement>("#media-title")!.textContent = "Unavailable";
-            error.textContent = denied ? "HTTP 403 · YouTube blocked this request." : "Could not analyze this media link.";
+            error.textContent = denied ? "HTTP 403 · Source refused the request." : "Could not analyze this media link.";
       } else {
         section.hidden = true;
         error.hidden = true;
