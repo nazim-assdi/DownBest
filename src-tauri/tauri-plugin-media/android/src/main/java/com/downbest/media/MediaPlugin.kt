@@ -160,6 +160,21 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         return true
     }
 
+    private fun isYouTubeUrl(rawUrl: String): Boolean {
+        val host = Uri.parse(rawUrl).host?.lowercase()?.removePrefix("www.") ?: return false
+        return host == "youtu.be" || host == "youtube.com" || host.endsWith(".youtube.com") ||
+            host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com")
+    }
+
+    private fun addYouTubeAndroidClient(request: YtDlpRequest, rawUrl: String) {
+        if (isYouTubeUrl(rawUrl)) {
+            // YouTube's default Android VR player can return video CDN URLs that
+            // are rejected with HTTP 403. The regular Android player client is a
+            // known workaround; keep the extractor's normal format selection.
+            request.addOption("--extractor-args", "youtube:player_client=android")
+        }
+    }
+
     @Command
     fun inspect(invoke: Invoke) {
         val args = invoke.parseArgs(InspectArgs::class.java)
@@ -181,6 +196,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 if (args.flatPlaylist) request.addOption("--flat-playlist")
                 else request.addOption("--no-playlist")
                 val runtimeAvailable = addJavascriptRuntime(request)
+                addYouTubeAndroidClient(request, args.url)
                 val response = YtDlp.executeAsync(request, DownloadProgressCallback { _, _, _ -> }).get(180, TimeUnit.SECONDS)
                 val result = JSObject()
                 result.put("output", response.output ?: "")
@@ -236,6 +252,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
 
                 addJavascriptRuntime(request)
+                addYouTubeAndroidClient(request, args.url)
                 if (!args.cookiesFile.isNullOrBlank()) {
                     val cookieFile = File(args.cookiesFile!!)
                     require(cookieFile.isFile && cookieFile.canRead()) {
