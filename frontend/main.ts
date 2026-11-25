@@ -35,7 +35,7 @@ let mediaAnalyzing = false;
 let autoProcessTimer: number | undefined;
 let autoProcessing = false;
 const autoAttempted = new Set<string>();
-const liveSamples = new Map<string, { bytes: number; at: number }>();
+const liveSamples = new Map<string, { bytes: number; at: number; lastMovingAt: number }>();
 const liveSpeeds = new Map<string, number>();
 
 const icons: Record<string, string> = {
@@ -258,16 +258,22 @@ function updateLiveSpeedSamples(next: Download[]) {
     }
     activeIds.add(item.id);
     const previous = liveSamples.get(item.id);
+    let lastMovingAt = previous?.lastMovingAt ?? now;
     if (previous && now > previous.at && item.downloaded_bytes >= previous.bytes) {
-      const instant = (item.downloaded_bytes - previous.bytes) * 1000 / (now - previous.at);
+      const elapsed = now - previous.at;
+      const instant = (item.downloaded_bytes - previous.bytes) * 1000 / elapsed;
       if (instant > 0) {
         const old = liveSpeeds.get(item.id) || instant;
         liveSpeeds.set(item.id, Math.round(old * 0.35 + instant * 0.65));
+        lastMovingAt = now;
+      } else if (now - lastMovingAt > 1800) {
+        liveSpeeds.set(item.id, 0);
       }
     } else {
       liveSpeeds.delete(item.id);
+      lastMovingAt = now;
     }
-    liveSamples.set(item.id, { bytes: item.downloaded_bytes, at: now });
+    liveSamples.set(item.id, { bytes: item.downloaded_bytes, at: now, lastMovingAt });
   }
   for (const id of [...liveSamples.keys()]) {
     if (!activeIds.has(id) && !next.some(item => item.id === id && ["Connecting", "Queued"].includes(item.status))) {
