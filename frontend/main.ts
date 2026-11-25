@@ -395,6 +395,18 @@ function findExistingMediaDownload(entry: MediaEntry): Download | undefined {
   const identity = mediaIdentityKey(entry.url);
   return downloads.find(item => item.status !== "Cancelled" && mediaIdentityKey(item.url) === identity);
 }
+function existingMediaStatus(download: Download): string {
+  switch (download.status) {
+    case "Completed": return "Downloaded";
+    case "Paused": return "Paused";
+    case "Failed": return "Failed";
+    case "Queued": return "Queued";
+    case "Retrying": return "Retrying";
+    case "Pausing": return "Pausing";
+    case "Cancelling": return "Cancelling";
+    default: return "In progress";
+  }
+}
 function isDirectFileUrl(raw: string): boolean {
   try {
     const url = new URL(raw);
@@ -650,9 +662,7 @@ function updateMediaSelection() {
     const row = input.closest<HTMLElement>(".media-entry");
     if (row) row.classList.toggle("already-downloaded", !!existing);
     const state = row?.querySelector<HTMLElement>(".media-entry-state");
-    if (state) state.textContent = existing
-      ? (existing.status === "Completed" ? "Downloaded" : "Queued")
-      : "";
+    if (state) state.textContent = existing ? existingMediaStatus(existing) : "";
   });
   const count = selectedMediaIndices().length;
   const total = mediaAnalysis?.entries.length || 0;
@@ -696,9 +706,7 @@ function renderMediaLibrary() {
     const existing = findExistingMediaDownload(entry);
     const checked = index === 0 && !existing ? " checked" : "";
     const disabled = existing ? " disabled" : "";
-    const state = existing
-      ? (existing.status === "Completed" ? "Downloaded" : "Queued")
-      : "";
+    const state = existing ? existingMediaStatus(existing) : "";
     return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-entry-thumb">' +
       (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
       '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' +
