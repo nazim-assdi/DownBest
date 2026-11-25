@@ -650,7 +650,7 @@ function updateMediaSelection() {
     if (row) row.classList.toggle("already-downloaded", !!existing);
     const state = row?.querySelector<HTMLElement>(".media-entry-state");
     if (state) state.textContent = existing
-      ? (existing.status === "Completed" ? "Already downloaded" : "Already in queue")
+      ? (existing.status === "Completed" ? "Downloaded" : "Queued")
       : "";
   });
   const count = selectedMediaIndices().length;
@@ -696,7 +696,7 @@ function renderMediaLibrary() {
     const checked = index === 0 && !existing ? " checked" : "";
     const disabled = existing ? " disabled" : "";
     const state = existing
-      ? (existing.status === "Completed" ? "Already downloaded" : "Already in queue")
+      ? (existing.status === "Completed" ? "Downloaded" : "Queued")
       : "";
     return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-entry-thumb">' +
       (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
