@@ -186,6 +186,7 @@ function renderDownloads() {
       : null;
     const etaLabel = done ? "Complete"
       : paused ? "Paused"
+      : queued ? "—"
       : etaSeconds !== null && Number.isFinite(etaSeconds) ? formatTime(etaSeconds)
       : activeNow ? "Calculating…" : "—";
     const sizeLabel = d.total_bytes
@@ -193,11 +194,10 @@ function renderDownloads() {
       : bytes(d.downloaded_bytes) + " downloaded";
     const progressKnown = d.total_bytes !== null || pct > 0 || done;
     const progressLabel = done ? "100%" : progressKnown ? pct.toFixed(1) + "%" : statusLabel;
-    const indeterminate = activeNow && !done && (
-      ["Connecting", "Extracting media", "Retrying"].includes(d.status) ||
-      (!d.total_bytes && pct <= 0)
-    );
-    const barWidth = done ? 100 : progressKnown ? pct : 28;
+    const indeterminate = !done &&
+      ["Connecting", "Extracting media", "Retrying", "Downloading"].includes(d.status) &&
+      !progressKnown;
+    const barWidth = done ? 100 : progressKnown ? pct : 0;
     const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
     const thumbnail = isMediaItem
       ? (mediaImage(d.media_thumbnail) || '<span class="transfer-media-placeholder">▶</span>')
