@@ -119,15 +119,8 @@ function isApplicationOrDocumentDownload(download: Download): boolean {
 function renderDownloads() {
   const list = document.querySelector<HTMLDivElement>("#download-list")!;
   const active = downloads.filter(d => !finalStatus(d.status));
-  const running = active.filter(d => d.status !== "Queued");
-  const queued = active.length - running.length;
-  const completed = downloads.filter(d => d.status === "Completed");
   const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled" || d.status === "Paused");
   document.querySelector("#active-count")!.textContent = String(active.length);
-  document.querySelector("#sidebar-active")!.textContent = running.length + " running";
-  document.querySelector("#sidebar-queued")!.textContent = queued + " waiting · max 2 parallel jobs";
-  document.querySelector("#stat-active")!.textContent = String(running.length);
-  document.querySelector("#stat-completed")!.textContent = String(completed.length);
   document.querySelector("#queue-count")!.textContent = String(downloads.length);
   document.querySelector("#count-all")!.textContent = String(downloads.length);
   document.querySelector("#count-active")!.textContent = String(active.length);
@@ -175,29 +168,12 @@ function renderDownloads() {
       d.status === "Connecting" ? "Connecting" :
       d.status === "Cancelling" ? "Cancelling" :
       d.status === "Pausing" ? "Pausing" : d.status;
-    const sizeDetail = d.total_bytes
-      ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
-      : bytes(d.downloaded_bytes) + " downloaded";
     const measuredSpeed = d.speed_bytes_sec || liveSpeeds.get(d.id) || 0;
     const etaText = d.total_bytes && measuredSpeed > 0
       ? formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed)
       : "";
-    const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" :
-      d.status === "Retrying" ? "Retrying…" :
-      queued ? "Waiting" :
-      d.status === "Connecting" ? "Connecting…" :
-      d.status === "Extracting media" ? (mediaTitle ? "Preparing video…" : (d.media_activity || "Preparing download…")) :
-      d.status === "Downloading" ? "Receiving…" :
-      done ? "Complete" : paused ? "Paused" : "—";
-    const detail = failedItem ? safe(d.error || "Download failed · press Retry to try again") :
-      paused ? "Paused · " + sizeDetail + " saved. Resume when you're ready." :
-      cancelled ? "This transfer was cancelled." :
-      done ? "Download completed successfully." :
-      queued ? "Added to queue · waiting for a download slot." :
-      d.status === "Retrying" ? safe(d.error || "Connection interrupted · retrying automatically.") :
-      d.status === "Connecting" ? "Connecting securely to the source…" :
-      d.status === "Extracting media" ? (mediaTitle ? "Preparing the selected video stream for download…" : (d.media_activity || "Preparing your transfer…")) :
-      d.downloaded_bytes > 0 ? "Receiving " + sizeDetail + " · estimating remaining time…" : "Preparing your transfer…";
+    const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" : "—";
+    const detail = failedItem ? safe(d.error || "Download failed") : "";
     let sourceHost = "";
     try { sourceHost = new URL(d.url).hostname.replace(/^www\./, ""); } catch { sourceHost = ""; }
     const sourceLabel = mediaTitle ? (mediaSourceLabel(d.url) || "MEDIA VIDEO") : sourceHost || "DIRECT DOWNLOAD";
@@ -235,9 +211,9 @@ function renderDownloads() {
               ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry this failed download">' + icons.refresh + '<span>Retry</span></button>'
               : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
     const transferMeta = '<div class="download-meta">' +
-      '<span class="download-meta-item"><small>RECEIVED</small><b>' + safe(receivedLabel) + '</b></span>' +
+      '<span class="download-meta-item"><small>SIZE</small><b>' + safe(receivedLabel) + '</b></span>' +
       '<span class="download-meta-item speed-meta"><small>' + (done ? "RESULT" : "SPEED") + '</small><b>' + safe(done ? "Saved" : speed) + '</b></span>' +
-      (etaLabel ? '<span class="download-meta-item eta-meta"><small>TIME LEFT</small><b>' + safe(etaLabel) + '</b></span>' : '') +
+      (etaLabel ? '<span class="download-meta-item eta-meta"><small>ETA</small><b>' + safe(etaLabel) + '</b></span>' : '') +
       '</div>';
     return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' +
       '<div class="download-card-visual">' + mediaVisual + '</div>' +
@@ -245,7 +221,7 @@ function renderDownloads() {
         '<div class="download-card-heading"><div class="download-card-title">' + mediaHeading +
           '<span class="download-source-label">' + safe(sourceLabel) + '</span></div>' +
           '<span class="status ' + statusClass + '"><i></i>' + safe(statusLabel) + '</span></div>' +
-        '<p class="download-card-message">' + detail + '</p>' +
+        (detail ? '<p class="download-card-message">' + detail + '</p>' : '') +
         '<div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div>' +
         transferMeta + output +
       '</div>' +
