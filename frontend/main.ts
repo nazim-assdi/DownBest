@@ -121,7 +121,7 @@ function renderDownloads() {
   const list = document.querySelector<HTMLDivElement>("#download-list")!;
   const active = downloads.filter(d => !finalStatus(d.status));
   const completed = downloads.filter(d => d.status === "Completed");
-  const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled" || d.status === "Paused");
+  const failed = downloads.filter(d => d.status === "Failed");
   document.querySelector("#active-count")!.textContent = String(active.length);
   document.querySelector("#queue-count")!.textContent = String(downloads.length);
   document.querySelector("#count-all")!.textContent = String(downloads.length);
@@ -133,7 +133,7 @@ function renderDownloads() {
   const visible = downloads.filter(d => {
     if (filter === "active" && finalStatus(d.status)) return false;
     if (filter === "completed" && d.status !== "Completed") return false;
-    if (filter === "failed" && d.status !== "Failed" && d.status !== "Cancelled" && d.status !== "Paused") return false;
+    if (filter === "failed" && d.status !== "Failed") return false;
     const searchable = (d.file_name + " " + d.url + " " + d.destination + " " + d.status).toLowerCase();
     return !query || searchable.includes(query);
   });
@@ -590,8 +590,9 @@ async function autoProcessPastedLinks() {
       updateAutoStatus("", "");
       toast(mediaAnalysis!.entries.length + " ready.");
     } else if (mediaErrors.length) {
-      // The Media Library already displays the error; avoid a duplicate toast and status message.
-      if (!mediaAnalyzing) updateAutoStatus("", "");
+      const hasMediaLink = candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url));
+      if (!hasMediaLink) toast(mediaErrors[0], true);
+      updateAutoStatus("", "");
     } else if (queued) {
       updateAutoStatus("", "");
     }
