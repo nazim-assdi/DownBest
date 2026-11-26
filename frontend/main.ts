@@ -767,22 +767,6 @@ function renderMediaLibrary() {
   }).join("");
   updateMediaSelection();
 }
-function renderMediaResolutionOptions(formats: MediaFormat[]) {
-  const select = document.querySelector<HTMLSelectElement>("#media-resolution-select")!;
-  const heights = Array.from(new Set(formats
-    .filter(format => format.isVideo)
-    .map(format => {
-      if (format.height && format.height > 0) return format.height;
-      const byDimensions = format.resolution.match(/x(\d{3,5})$/i);
-      const byLabel = format.resolution.match(/(\d{3,5})p/i);
-      return Number((byDimensions || byLabel)?.[1] || 0);
-    })
-    .filter(height => Number.isFinite(height) && height >= 144)))
-    .sort((a, b) => b - a);
-  select.innerHTML = '<option value="">Auto</option>' +
-    heights.map(height => '<option value="max-height-' + height + '">Up to ' + height + 'p</option>').join("");
-  select.disabled = heights.length === 0 || mediaAnalyzing;
-}
 
 async function downloadSelectedMedia() {
   if (!mediaAnalysis) return;
