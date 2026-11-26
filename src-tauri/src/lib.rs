@@ -309,6 +309,8 @@ fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
     }
     let parts = destination.join(format!(".downbest-{id}"));
     let _ = std::fs::remove_dir_all(parts);
+    let media_work = destination.join(format!(".downbest-work-{id}"));
+    let _ = std::fs::remove_dir_all(media_work);
 
     let site_job_suffix = if cfg!(target_os = "android") { id.to_string() } else { id.chars().take(8).collect() };
     let marker = format!(" - {site_job_suffix}.");
@@ -1720,8 +1722,8 @@ fn reserve_response_path(
 }
 
 fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
-    const MIN_PARALLEL_FILE: u64 = 16 * 1024 * 1024;
-    const TARGET_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
+    const MIN_PARALLEL_FILE: u64 = 8 * 1024 * 1024;
+    const TARGET_SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
     if total_bytes < MIN_PARALLEL_FILE {
         return 1;
     }
@@ -2346,6 +2348,9 @@ async fn run_media_download(
         "yt-dlp was not found. Install yt-dlp or place it in the app's tools folder to download from media sites.".to_string())?;
     let has_ffmpeg = find_tool(app, "ffmpeg").is_some();
     let aria2 = find_tool(app, "aria2c");
+    let media_work_dir = destination.join(format!(".downbest-work-{id}"));
+    fs::create_dir_all(&media_work_dir).await
+        .map_err(|error| format!("Could not prepare private media download workspace: {error}"))?;
     let mut command = Command::new(&yt_dlp);
     configure_tool_environment(&mut command, &yt_dlp);
     configure_no_console(&mut command);
@@ -2359,7 +2364,9 @@ async fn run_media_download(
         .arg("--progress-delta").arg("0.5")
         .arg("--print").arg("before_dl:__DOWNBEST_TITLE__%(title)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
-        .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
+        .arg("-P").arg(format!("home:{}", destination.display()))
+        .arg("-P").arg(format!("temp:{}", media_work_dir.display()))
+        .arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
     let selected_format = selected_media_format(kind, format_selector, has_ffmpeg)?;
     command.arg("-f").arg(selected_format);
     if kind == "audio" && has_ffmpeg {
@@ -2381,7 +2388,7 @@ async fn run_media_download(
         command.arg("--downloader").arg("aria2c")
             .arg("--downloader").arg("dash,m3u8:native")
             .arg("--downloader-args").arg(format!(
-                "aria2c:-c -x {} -s {} -k 1M --summary-interval=1 --show-console-readout=true",
+                "aria2c:-c -x {} -s {} -k 4M --summary-interval=1 --show-console-readout=true",
                 concurrency.clamp(2, 16), concurrency.clamp(2, 16)
             ));
         if let Some(parent) = aria_path.parent() {
@@ -2456,6 +2463,7 @@ async fn run_media_download(
         match output {
             Some(path) if path.is_file() => {
                 set_file_path(manager, id, &path);
+                let _ = fs::remove_dir_all(&media_work_dir).await;
                 Ok(())
             }
             Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {}", path.display())),
@@ -3409,31 +3417,18 @@ mod lite_mode_tests {
     }
 
     #[test]
-    fn lite_mode_uses_one_stream_for_small_files() {
-        assert_eq!(effective_segment_count(15 * 1024 * 1024, 2), 1);
+    fn small_files_use_one_stream_and_medium_files_scale_up() {
+        assert_eq!(effective_segment_count(7 * 1024 * 1024, 16), 1);
+        assert_eq!(effective_segment_count(8 * 1024 * 1024, 2), 2);
+        assert_eq!(effective_segment_count(16 * 1024 * 1024, 4), 4);
     }
 
     #[test]
-    fn lite_mode_caps_large_downloads_at_two_segments() {
-        assert_eq!(effective_segment_count(16 * 1024 * 1024, 2), 2);
-        assert_eq!(effective_segment_count(128 * 1024 * 1024, 2), 2);
-    }
-
-    #[test]
-    fn balanced_and_high_modes_respect_requested_limits() {
+    fn parallel_ranges_respect_user_connection_limits() {
         assert_eq!(effective_segment_count(32 * 1024 * 1024, 4), 4);
         assert_eq!(effective_segment_count(64 * 1024 * 1024, 8), 8);
-        assert_eq!(effective_segment_count(64 * 1024 * 1024, 32), 8);
-    }
-
-    #[test]
-    fn turbo_profile_can_use_sixteen_parallel_ranges_on_large_files() {
+        assert_eq!(effective_segment_count(64 * 1024 * 1024, 32), 16);
         assert_eq!(effective_segment_count(256 * 1024 * 1024, 16), 16);
-        assert_eq!(effective_segment_count(256 * 1024 * 1024, 32), 16);
-    }
-
-    #[test]
-    fn lite_profile_stays_at_two_connections_for_large_files() {
         assert_eq!(effective_segment_count(256 * 1024 * 1024, 2), 2);
     }
 }
