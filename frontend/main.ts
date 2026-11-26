@@ -222,7 +222,7 @@ function renderDownloads() {
               : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
     const output = done && d.file_path
       ? '<div class="transfer-output" title="' + safe(d.file_path) + '">' + icons.folder +
-        '<span>' + safe(isPublicMobileFile ? "Saved to Downloads" : desktopFileActions ? d.file_path : "Saved") + '</span></div>'
+        '<span>' + safe(isMobileSavedFile ? (d.file_path.startsWith("content://") ? "Saved to Downloads" : "Saved in app Downloads") : desktopFileActions ? d.file_path : "Saved") + '</span></div>'
       : "";
     const detail = failedItem ? '<div class="transfer-error">' + safe(d.error || "Download failed") + '</div>' : "";
     return '<article class="transfer-card ' + statusClass + (isMediaItem ? ' transfer-media' : '') + '">' +
