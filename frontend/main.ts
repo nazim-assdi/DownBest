@@ -94,7 +94,7 @@ root.innerHTML = [
   '<div><label for="concurrency">SPEED</label><select id="concurrency"><option value="2">Low · 2 connections</option><option value="4">Balanced · 4 connections</option><option value="8" selected>Fast · 8 connections</option><option value="16">Max · 16 connections</option></select></div>',
   '<div class="destination"><label for="destination">SAVE TO</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Downloads"><button id="choose-folder" type="button">Browse</button></div></div></div>',
   '</div></section>',
-  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><h2 id="media-title">Media</h2><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-preview-row"><div id="media-preview-thumb" class="media-preview-thumb"><span>▶</span></div><div class="media-quality media-quality-inline"><label for="media-quality-select">MODE<select id="media-quality-select"><option value="">Video + audio</option><option value="audio">Audio</option></select></label><label for="media-resolution-select">RESOLUTION<select id="media-resolution-select" disabled><option value="">Auto</option></select></label></div></div><div class="media-library-controls"><div class="media-select-tools"><span id="media-entry-count">0 items</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
+  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><h2 id="media-title">Media</h2><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-preview-row"><div id="media-preview-thumb" class="media-preview-thumb"><span>▶</span></div><div class="media-preview-caption"><b id="media-preview-title">Select items</b><small>Choose format and resolution on each item.</small></div></div><div class="media-library-controls"><div class="media-select-tools"><span id="media-entry-count">0 items</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
 
   '<section class="queue"><div class="queue-head"><h2>Queue <i id="queue-count">0</i></h2><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
@@ -675,6 +675,19 @@ function selectedMediaIndices(): number[] {
     .map(input => Number(input.dataset.mediaIndex))
     .filter(index => Number.isInteger(index) && index >= 0 && !!mediaAnalysis?.entries[index]);
 }
+function mediaFormatOptions(): string {
+  return '<option value="">Auto</option>' + Array.from(new Set(mediaFormats
+    .filter(format => format.isVideo)
+    .map(format => {
+      if (format.height && format.height > 0) return format.height;
+      const byDimensions = format.resolution.match(/x(\\d{3,5})$/i);
+      const byLabel = format.resolution.match(/(\\d{3,5})p/i);
+      return Number((byDimensions || byLabel)?.[1] || 0);
+    })
+    .filter(height => Number.isFinite(height) && height >= 144)))
+    .sort((a,b)=>b-a)
+    .map(height => '<option value="max-height-' + height + '">' + height + 'p</option>').join("");
+}
 function updateMediaSelection() {
   document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => {
     const index = Number(input.dataset.mediaIndex);
@@ -683,23 +696,38 @@ function updateMediaSelection() {
     input.disabled = !!existing;
     if (existing) input.checked = false;
     const row = input.closest<HTMLElement>(".media-entry");
-    if (row) row.classList.toggle("already-downloaded", !!existing);
+    if (row) {
+      row.classList.toggle("already-downloaded", !!existing);
+      row.classList.toggle("is-downloading", !!existing && !finalStatus(existing.status));
+    }
     const state = row?.querySelector<HTMLElement>(".media-entry-state");
-    if (state) state.textContent = existing ? existingMediaStatus(existing) : "";
+    const progress = row?.querySelector<HTMLElement>(".media-entry-progress");
+    const status = existing ? (existing.status === "Downloading" ? "Downloading" :
+      existing.status === "Extracting media" ? (existing.media_activity || "Preparing") :
+      existing.status === "Completed" ? "Complete" : existing.status) : "";
+    if (state) state.textContent = status || "";
+    if (progress) {
+      const active = !!existing && !finalStatus(existing.status);
+      const pct = existing ? Math.max(0, Math.min(100, existing.progress || 0)) : 0;
+      const speed = existing ? Math.max(0, existing.speed_bytes_sec || liveSpeeds.get(existing.id) || 0) : 0;
+      const eta = existing?.total_bytes && speed > 0 ? formatTime((existing.total_bytes-existing.downloaded_bytes)/speed) : "—";
+      progress.innerHTML = existing
+        ? '<div class="media-inline-progress"><div class="media-inline-track"><i style="width:' + pct.toFixed(1) + '%"></i></div><div class="media-inline-metrics"><b>' + safe(existing.status === "Completed" ? "100%" : pct.toFixed(1) + "%") + '</b><span>' + safe(speed > 0 ? bytes(speed) + "/s" : active ? "Calculating…" : existing.status) + '</span><span>' + safe(existing.total_bytes ? bytes(existing.downloaded_bytes) + " / " + bytes(existing.total_bytes) : bytes(existing.downloaded_bytes)) + '</span><span>ETA ' + safe(eta) + '</span></div></div>'
+        : "";
+    }
+    const controls = row?.querySelector<HTMLElement>(".media-entry-options");
+    if (controls) controls.hidden = !!existing;
   });
   const count = selectedMediaIndices().length;
   const total = mediaAnalysis?.entries.length || 0;
   const label = document.querySelector<HTMLElement>("#media-selection-summary");
   const counter = document.querySelector<HTMLElement>("#media-entry-count");
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media");
-  const quality = document.querySelector<HTMLSelectElement>("#media-quality-select");
-  const resolution = document.querySelector<HTMLSelectElement>("#media-resolution-select");
   if (label) label.textContent = count + " selected";
   if (counter) counter.textContent = total + " items";
-  if (resolution) resolution.disabled = mediaAnalyzing || quality?.value === "audio" || resolution.options.length <= 1;
   if (button) {
     button.disabled = count === 0 || mediaAnalyzing;
-    button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count + " selected";
+    button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count;
   }
 }
 function renderMediaLibrary() {
@@ -707,34 +735,35 @@ function renderMediaLibrary() {
   const error = document.querySelector<HTMLElement>("#media-error")!;
   if (!mediaAnalysis) { section.hidden = true; return; }
   section.hidden = false;
-  const title = document.querySelector<HTMLElement>("#media-title")!;
-  title.textContent = mediaAnalysis.title;
+  document.querySelector<HTMLElement>("#media-title")!.textContent = mediaAnalysis.title;
   const preview = document.querySelector<HTMLDivElement>("#media-preview-thumb")!;
   const previewUrl = mediaAnalysis.thumbnail || mediaAnalysis.entries[0]?.thumbnail || null;
   preview.innerHTML = mediaImage(previewUrl) || '<span class="media-thumb-placeholder">▶</span>';
-  const quality = document.querySelector<HTMLSelectElement>("#media-quality-select")!;
-  const previous = quality.value;
-  quality.innerHTML = '<option value="">Video + audio</option><option value="audio">Audio</option>';
-  if (previous === "audio") quality.value = previous;
-  const resolution = document.querySelector<HTMLSelectElement>("#media-resolution-select")!;
-  resolution.innerHTML = '<option value="">Auto</option>';
-  resolution.value = "";
-  resolution.disabled = true;
+  document.querySelector<HTMLElement>("#media-preview-title")!.textContent = mediaAnalysis.title;
   error.hidden = true;
   error.textContent = "";
   const list = document.querySelector<HTMLDivElement>("#media-entry-list")!;
+  const resolutionOptions = mediaFormatOptions();
   list.innerHTML = mediaAnalysis.entries.map((entry, index) => {
     const thumbnail = mediaImage(entry.thumbnail);
     const indexLabel = entry.playlistIndex ?? index + 1;
     const existing = findExistingMediaDownload(entry);
     const checked = index === 0 && !existing ? " checked" : "";
     const disabled = existing ? " disabled" : "";
-    const state = existing ? existingMediaStatus(existing) : "";
-    return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-entry-thumb">' +
-      (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
-      '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' +
-      safe(entry.title) + '</b>' + (entry.duration !== null && Number.isFinite(entry.duration) ? '<small>' + safe(mediaDuration(entry.duration)) + '</small>' : '') +
-      '<small class="media-entry-state">' + state + '</small></span></label>';
+    const status = existing ? (existing.status === "Downloading" ? "Downloading" :
+      existing.status === "Extracting media" ? (existing.media_activity || "Preparing") :
+      existing.status === "Completed" ? "Complete" : existing.status) : "Select";
+    const progress = existing ? '<div class="media-entry-progress"></div>' : '<div class="media-entry-progress"></div>';
+    return '<article class="media-entry' + (existing ? ' already-downloaded' : '') + '">' +
+      '<div class="media-entry-main"><label class="media-entry-pick"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-select-mark">✓</span></label>' +
+      '<span class="media-entry-thumb">' + (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
+      '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' + safe(entry.title) + '</b>' +
+      (entry.duration !== null && Number.isFinite(entry.duration) ? '<small>' + safe(mediaDuration(entry.duration)) + '</small>' : '') +
+      '<small class="media-entry-state">' + safe(status) + '</small></span></div>' +
+      '<div class="media-entry-options"' + (existing ? ' hidden' : '') + '>' +
+      '<label>TYPE<select data-media-kind="' + index + '"><option value="auto">Video + audio</option><option value="audio">Audio</option><option value="video-only">Video only</option></select></label>' +
+      '<label>QUALITY<select data-media-format="' + index + '">' + resolutionOptions + '</select></label></div>' +
+      progress + '</article>';
   }).join("");
   updateMediaSelection();
 }
@@ -758,37 +787,31 @@ function renderMediaResolutionOptions(formats: MediaFormat[]) {
 async function downloadSelectedMedia() {
   if (!mediaAnalysis) return;
   const indices = selectedMediaIndices();
-  if (!indices.length) { toast("Select videos first.", true); return; }
+  if (!indices.length) { toast("Select items first.", true); return; }
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media")!;
-  const audioOnly = document.querySelector<HTMLSelectElement>("#media-quality-select")!.value === "audio";
-  const formatSelector = audioOnly ? "audio" : (document.querySelector<HTMLSelectElement>("#media-resolution-select")!.value || null);
   const destination = document.querySelector<HTMLInputElement>("#destination")!.value.trim();
   const concurrency = Number(document.querySelector<HTMLSelectElement>("#concurrency")!.value);
   button.disabled = true;
-  let added = 0;
-  let failed = 0;
+  let added = 0, failed = 0;
   try {
     for (let offset = 0; offset < indices.length; offset += 8) {
       const batch = indices.slice(offset, offset + 8);
       const results = await Promise.allSettled(batch.map(index => {
         const entry = mediaAnalysis!.entries[index];
+        const kind = document.querySelector<HTMLSelectElement>('[data-media-kind="' + index + '"]')?.value || "auto";
+        const formatSelector = kind === "audio" ? "audio" :
+          (document.querySelector<HTMLSelectElement>('[data-media-format="' + index + '"]')?.value || null);
         return invoke("start_download", {
-          url: entry.url,
-          kind: audioOnly ? "audio" : "auto",
-          destination: destination || null,
-          concurrency,
-          cookies: null,
-          formatSelector,
-          mediaTitle: entry.title,
-          mediaThumbnail: entry.thumbnail
+          url: entry.url, kind, destination: destination || null, concurrency,
+          cookies: null, formatSelector, mediaTitle: entry.title, mediaThumbnail: entry.thumbnail
         });
       }));
       added += results.filter(result => result.status === "fulfilled").length;
       failed += results.length - results.filter(result => result.status === "fulfilled").length;
       await refreshDownloads();
-      button.textContent = "Queued " + added + " / " + indices.length;
+      button.textContent = "Starting " + added + " / " + indices.length;
     }
-    toast(added + " added" + (failed ? " · " + failed + " failed" : "") + ".");
+    toast(added + " started" + (failed ? " · " + failed + " failed" : "") + ".");
     scheduleRefresh(100);
   } catch (problem) {
     toast(String(problem), true);
@@ -800,10 +823,9 @@ document.querySelector("#close-media-library")!.addEventListener("click", () => 
   document.querySelector<HTMLElement>("#media-library")!.hidden = true;
 });
 document.querySelector("#media-entry-list")!.addEventListener("change", updateMediaSelection);
-document.querySelector("#media-quality-select")!.addEventListener("change", updateMediaSelection);
-document.querySelector("#media-resolution-select")!.addEventListener("change", updateMediaSelection);
+document.querySelector("#media-entry-list")!.addEventListener("change", updateMediaSelection);
 document.querySelector("#select-all-media")!.addEventListener("click", () => {
-  document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => { input.checked = true; });
+  document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => { if (!input.disabled) input.checked = true; });
   updateMediaSelection();
 });
 document.querySelector("#clear-all-media")!.addEventListener("click", () => {
