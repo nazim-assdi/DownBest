@@ -196,6 +196,28 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         }, "DownBest-publish-download").start()
     }
 
+    private fun copyToOpenCache(source: File): File {
+        val folder = File(activity.cacheDir, "downbest-open")
+        if (!folder.exists() && !folder.mkdirs()) {
+            throw IllegalStateException("Could not prepare the file preview cache.")
+        }
+        val extension = source.extension.takeIf { it.matches(Regex("[A-Za-z0-9]{1,10}")) }
+            ?.let { ".$it" } ?: ".bin"
+        val target = File.createTempFile("download-", extension, folder)
+        try {
+            source.inputStream().buffered().use { input ->
+                target.outputStream().buffered().use { output -> input.copyTo(output, 256 * 1024) }
+            }
+            require(target.isFile && target.length() > 0L) {
+                "Could not prepare the downloaded file for opening."
+            }
+            return target
+        } catch (error: Exception) {
+            target.delete()
+            throw error
+        }
+    }
+
     @Command
     fun openDownload(invoke: Invoke) {
         val args = invoke.parseArgs(OpenDownloadArgs::class.java)
@@ -207,11 +229,20 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 } else {
                     val file = File(raw)
                     require(file.isFile && file.canRead()) { "The downloaded file is no longer available." }
-                    FileProvider.getUriForFile(
-                        activity,
-                        "${activity.packageName}.downbest.media.fileprovider",
-                        file
-                    )
+                    // Reuse Tauri's host FileProvider (already declared by the app).
+                    // Copy into cache so the generated provider's cache-path is sufficient
+                    // even when Android's app-specific Downloads folder is not exposed.
+                    val shareFile = copyToOpenCache(file)
+                    try {
+                        FileProvider.getUriForFile(
+                            activity,
+                            "${activity.packageName}.fileprovider",
+                            shareFile
+                        )
+                    } catch (error: Exception) {
+                        shareFile.delete()
+                        throw error
+                    }
                 }
                 val mimeType = activity.contentResolver.getType(uri)
                     ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(
