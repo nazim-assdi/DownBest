@@ -1148,6 +1148,7 @@ fn normalize_download_kind(kind: &str) -> &'static str {
     match kind {
         "file" => "file",
         "audio" => "audio",
+        "video-only" => "video-only",
         _ => "auto",
     }
 }
@@ -2828,7 +2829,8 @@ mod lite_mode_tests {
         assert_eq!(super::normalize_download_kind("file"), "file");
         assert_eq!(super::normalize_download_kind("audio"), "audio");
         assert_eq!(super::normalize_download_kind("video"), "auto");
-        assert_eq!(super::normalize_download_kind("video-only"), "auto");
+        assert_eq!(super::normalize_download_kind("video-only"), "video-only");
+        assert_eq!(super::selected_media_format("video-only", None, true).unwrap(), "bestvideo");
         assert_eq!(super::normalize_download_kind("unknown"), "auto");
     }
 
