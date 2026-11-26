@@ -37,6 +37,7 @@ let autoProcessing = false;
 const autoAttempted = new Set<string>();
 const liveSamples = new Map<string, { bytes: number; at: number; lastMovingAt: number }>();
 const liveSpeeds = new Map<string, number>();
+const mediaDownloadIds = new Set<string>();
 
 const icons: Record<string, string> = {
   download: '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>',
@@ -131,6 +132,7 @@ function renderDownloads() {
 
   const query = document.querySelector<HTMLInputElement>("#download-search")!.value.trim().toLowerCase();
   const visible = downloads.filter(d => {
+    if (mediaDownloadIds.has(d.id)) return false;
     if (mediaAnalysis && mediaAnalysis.entries.some(entry => mediaIdentityKey(entry.url) === mediaIdentityKey(d.url))) return false;
     if (filter === "active" && finalStatus(d.status)) return false;
     if (filter === "completed" && d.status !== "Completed") return false;
@@ -711,8 +713,13 @@ function updateMediaSelection() {
       const pct = existing ? Math.max(0, Math.min(100, existing.progress || 0)) : 0;
       const speed = existing ? Math.max(0, existing.speed_bytes_sec || liveSpeeds.get(existing.id) || 0) : 0;
       const eta = existing?.total_bytes && speed > 0 ? formatTime((existing.total_bytes-existing.downloaded_bytes)/speed) : "—";
+      const actions = existing && !finalStatus(existing.status)
+        ? '<div class="media-inline-actions"><button data-pause="' + safe(existing.id) + '">Pause</button><button data-cancel="' + safe(existing.id) + '">Cancel</button></div>'
+        : existing && (existing.status === "Paused" || existing.status === "Failed")
+          ? '<div class="media-inline-actions"><button data-resume="' + safe(existing.id) + '">' + (existing.status === "Paused" ? "Resume" : "Retry") + '</button></div>'
+          : "";
       progress.innerHTML = existing
-        ? '<div class="media-inline-progress"><div class="media-inline-track"><i style="width:' + pct.toFixed(1) + '%"></i></div><div class="media-inline-metrics"><b>' + safe(existing.status === "Completed" ? "100%" : pct.toFixed(1) + "%") + '</b><span>' + safe(speed > 0 ? bytes(speed) + "/s" : active ? "Calculating…" : existing.status) + '</span><span>' + safe(existing.total_bytes ? bytes(existing.downloaded_bytes) + " / " + bytes(existing.total_bytes) : bytes(existing.downloaded_bytes)) + '</span><span>ETA ' + safe(eta) + '</span></div></div>'
+        ? '<div class="media-inline-progress"><div class="media-inline-track"><i style="width:' + pct.toFixed(1) + '%"></i></div><div class="media-inline-metrics"><b>' + safe(existing.status === "Completed" ? "100%" : pct.toFixed(1) + "%") + '</b><span>' + safe(speed > 0 ? bytes(speed) + "/s" : active ? (existing.downloaded_bytes > 0 ? "Updating…" : "Preparing…") : existing.status) + '</span><span>' + safe(existing.total_bytes ? bytes(existing.downloaded_bytes) + " / " + bytes(existing.total_bytes) : bytes(existing.downloaded_bytes) + " downloaded") + '</span><span>ETA ' + safe(eta) + '</span>' + actions + '</div></div>'
         : "";
     }
     const controls = row?.querySelector<HTMLElement>(".media-entry-options");
@@ -785,11 +792,14 @@ async function downloadSelectedMedia() {
         const kind = document.querySelector<HTMLSelectElement>('[data-media-kind="' + index + '"]')?.value || "auto";
         const formatSelector = kind === "audio" ? "audio" :
           (document.querySelector<HTMLSelectElement>('[data-media-format="' + index + '"]')?.value || null);
-        return invoke("start_download", {
+        return invoke<Download>("start_download", {
           url: entry.url, kind, destination: destination || null, concurrency,
           cookies: null, formatSelector, mediaTitle: entry.title, mediaThumbnail: entry.thumbnail
         });
       }));
+      for (const result of results) {
+        if (result.status === "fulfilled") mediaDownloadIds.add(result.value.id);
+      }
       added += results.filter(result => result.status === "fulfilled").length;
       failed += results.length - results.filter(result => result.status === "fulfilled").length;
       await refreshDownloads();
@@ -806,7 +816,6 @@ async function downloadSelectedMedia() {
 document.querySelector("#close-media-library")!.addEventListener("click", () => {
   document.querySelector<HTMLElement>("#media-library")!.hidden = true;
 });
-document.querySelector("#media-entry-list")!.addEventListener("change", updateMediaSelection);
 document.querySelector("#media-entry-list")!.addEventListener("change", updateMediaSelection);
 document.querySelector("#select-all-media")!.addEventListener("click", () => {
   document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => { if (!input.disabled) input.checked = true; });
@@ -830,7 +839,7 @@ document.querySelector("#choose-folder")!.addEventListener("click", async () => 
   }
 });
 
-document.querySelector("#download-list")!.addEventListener("click", async event => {
+async function handleDownloadAction(event: Event) {
   const target = event.target as HTMLElement;
   const pause = target.closest<HTMLButtonElement>("[data-pause]");
   if (pause) {
@@ -878,7 +887,9 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
       await invoke("reveal_download", { id: reveal.dataset.reveal });
     } catch (error) { toast(String(error), true); }
   }
-});
+}
+document.querySelector("#download-list")!.addEventListener("click", handleDownloadAction);
+document.querySelector("#media-entry-list")!.addEventListener("click", handleDownloadAction);
 document.querySelector("#download-search")!.addEventListener("input", renderDownloads);
 document.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach(button => {
   button.addEventListener("click", () => {
