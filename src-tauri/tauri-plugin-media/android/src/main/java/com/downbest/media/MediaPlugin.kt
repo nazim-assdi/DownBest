@@ -209,6 +209,31 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    private fun ensureYtDlpInitialized() {
+        if (ytdlpInitialized) return
+        synchronized(ytdlpInitLock) {
+            if (!ytdlpInitialized) {
+                YtDlp.init(activity.applicationContext)
+                ytdlpInitialized = true
+            }
+        }
+    }
+
+    private fun javascriptRuntimePath(): String? {
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { it == "arm64-v8a" || it == "x86_64" }
+            ?: return null
+        val runtime = File(activity.applicationInfo.nativeLibraryDir, "libqjs.so")
+        if (runtime.isFile && !runtime.canExecute()) runtime.setExecutable(true, false)
+        return runtime.absolutePath.takeIf { runtime.isFile && runtime.canExecute() }
+    }
+
+    private fun addJavascriptRuntime(request: YtDlpRequest): Boolean {
+        val runtime = javascriptRuntimePath() ?: return false
+        request.addOption("--js-runtimes", "quickjs:$runtime")
+        request.addOption("--remote-components", "ejs:github")
+        return true
+    }
+
     @Command
     fun inspect(invoke: Invoke) {
         val args = invoke.parseArgs(InspectArgs::class.java)
@@ -296,7 +321,6 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
 
                 addJavascriptRuntime(request)
-                addYouTubeAndroidClient(request, args.url)
                 if (!args.cookiesFile.isNullOrBlank()) {
                     val cookieFile = File(args.cookiesFile!!)
                     require(cookieFile.isFile && cookieFile.canRead()) {
