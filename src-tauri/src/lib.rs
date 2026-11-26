@@ -1022,7 +1022,10 @@ async fn inspect_media_json(
         let mut command = Command::new(&yt_dlp);
         configure_tool_environment(&mut command, &yt_dlp);
         configure_no_console(&mut command);
-        command.arg("--dump-single-json").arg("--skip-download")
+        // Bundled desktop yt-dlp standalone builds include curl-cffi.
+        // Ask for Chrome TLS/client fingerprint during metadata extraction.
+        command.arg("--impersonate").arg("chrome")
+            .arg("--dump-single-json").arg("--skip-download")
             .arg("--no-warnings").arg("--no-progress").arg("--no-colors")
             .arg("--no-call-home").arg("--retries").arg("2").arg("--socket-timeout").arg("20");
         if flat_playlist {
@@ -2403,7 +2406,9 @@ async fn run_media_download(
     let mut command = Command::new(&yt_dlp);
     configure_tool_environment(&mut command, &yt_dlp);
     configure_no_console(&mut command);
-    command.arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
+    // Use a real browser-like TLS handshake for site extractors and media requests.
+    command.arg("--impersonate").arg("chrome")
+        .arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
         .arg("--socket-timeout").arg("20")
         .arg("--retries").arg("4").arg("--fragment-retries").arg("4")
         .arg("--extractor-retries").arg("2").arg("--file-access-retries").arg("2")
