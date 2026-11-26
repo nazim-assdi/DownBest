@@ -256,16 +256,25 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 require(args.url.startsWith("https://") || args.url.startsWith("http://")) {
                     "Only HTTP and HTTPS media URLs are supported."
                 }
-                val folder = File(args.destination)
-                if (!folder.exists() && !folder.mkdirs()) {
+                val destinationFolder = File(args.destination)
+                if (!destinationFolder.exists() && !destinationFolder.mkdirs()) {
                     throw IllegalStateException("Could not create the selected save folder.")
                 }
-                if (!folder.isDirectory) {
+                if (!destinationFolder.isDirectory) {
                     throw IllegalStateException("The selected save location is not a folder.")
                 }
 
                 require(args.jobId.matches(Regex("[A-Za-z0-9_-]{8,64}"))) {
                     "The download job identifier is invalid."
+                }
+                // Keep yt-dlp's split audio/video tracks, .part files and fragment
+                // chunks in a per-job workspace, never beside finished Downloads.
+                val folder = File(destinationFolder, ".downbest-work-${args.jobId}")
+                if (!folder.exists() && !folder.mkdirs()) {
+                    throw IllegalStateException("Could not create a private media workspace.")
+                }
+                if (!folder.isDirectory) {
+                    throw IllegalStateException("The private media workspace is not a folder.")
                 }
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 ensureYtDlpInitialized()
