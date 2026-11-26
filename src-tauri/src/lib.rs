@@ -344,11 +344,19 @@ fn partial_bytes_for(record: &DownloadRecord) -> u64 {
             found_partial = true;
         }
     }
-    let parts = PathBuf::from(&record.destination).join(format!(".downbest-{}", record.id));
-    if let Ok(entries) = std::fs::read_dir(parts) {
-        for entry in entries.flatten() {
-            bytes = bytes.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
-            found_partial = true;
+    for parts in [
+        job_work_dir(&record.id).join("http-parts"),
+        PathBuf::from(&record.destination).join(format!(".downbest-{}", record.id)),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(parts) {
+            for entry in entries.flatten() {
+                if entry.file_name() == "manifest" { continue; }
+                let Ok(metadata) = entry.metadata() else { continue; };
+                if metadata.is_file() {
+                    bytes = bytes.saturating_add(metadata.len());
+                    found_partial = true;
+                }
+            }
         }
     }
     if found_partial { bytes } else { record.downloaded.load(Ordering::Relaxed) }
@@ -2055,6 +2063,19 @@ async fn download_segmented(
 ) -> Result<(), String> {
     let parts_dir = job_work_dir(id).join("http-parts");
     fs::create_dir_all(&parts_dir).await.map_err(|e| format!("Cannot create temporary folder: {e}"))?;
+    // Part N is tied to the exact total size and segment count. A changed speed
+    // profile must not append old bytes into new byte ranges after restart.
+    let manifest_path = parts_dir.join("manifest");
+    let expected_manifest = format!("{total}:{count}");
+    let previous_manifest = fs::read_to_string(&manifest_path).await.ok();
+    if previous_manifest.as_deref() != Some(expected_manifest.as_str()) {
+        fs::remove_dir_all(&parts_dir).await
+            .map_err(|error| format!("Could not reset incompatible download parts: {error}"))?;
+        fs::create_dir_all(&parts_dir).await
+            .map_err(|error| format!("Cannot recreate temporary download folder: {error}"))?;
+        fs::write(&manifest_path, &expected_manifest).await
+            .map_err(|error| format!("Could not save download range layout: {error}"))?;
+    }
     let chunk_size = (total + count as u64 - 1) / count as u64;
     let mut existing_total = 0u64;
     let mut jobs = Vec::new();
