@@ -2209,14 +2209,20 @@ async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, 
         handle.media().publish_download(MediaPublishRequest { file_path: source_path })
     }).await.map_err(|error| format!("Android Downloads worker failed: {error}"))?
         .map_err(|error| format!("Could not publish the finished file to Downloads: {error}"))?;
-    if !published.content_uri.starts_with("content://") {
-        return Err("Android returned an invalid public file location.".into());
+    let is_public_download = published.content_uri.starts_with("content://");
+    let is_app_download = Path::new(&published.content_uri).is_file();
+    if !is_public_download && !is_app_download {
+        return Err("Android returned an invalid downloaded file location.".into());
     }
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
             record.file_name = published.file_name;
             record.file_path = Some(published.content_uri);
-            record.destination = "Downloads".into();
+            record.destination = if is_public_download {
+                "Downloads".into()
+            } else {
+                "App downloads".into()
+            };
         }
     }
     persist_records(manager);
@@ -2236,8 +2242,8 @@ async fn open_download(
             records.get(&id).and_then(|record| record.file_path.clone())
                 .ok_or_else(|| "The saved file location is unavailable.".to_string())?
         };
-        if !content_uri.starts_with("content://") {
-            return Err("This item is not saved in the public Downloads folder.".into());
+        if !content_uri.starts_with("content://") && !Path::new(&content_uri).is_file() {
+            return Err("The saved download location is no longer available.".into());
         }
         let handle = app.clone();
         tokio::task::spawn_blocking(move || {
