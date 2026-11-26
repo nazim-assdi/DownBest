@@ -290,6 +290,10 @@ fn cleanup_job_cookies(manager: &DownloadManager, id: &str) {
     persist_records(manager);
 }
 
+fn job_work_dir(id: &str) -> PathBuf {
+    std::env::temp_dir().join("DownBest").join("work").join(id)
+}
+
 fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
     let (destination, file_path) = match manager.records.lock() {
         Ok(records) => match records.get(id) {
@@ -307,10 +311,12 @@ fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
         let checkpoint_staging = checkpoint.with_extension("hls.tmp");
         let _ = std::fs::remove_file(checkpoint_staging);
     }
-    let parts = destination.join(format!(".downbest-{id}"));
-    let _ = std::fs::remove_dir_all(parts);
-    let media_work = destination.join(format!(".downbest-work-{id}"));
-    let _ = std::fs::remove_dir_all(media_work);
+    let _ = std::fs::remove_dir_all(job_work_dir(id));
+    // Remove legacy work folders created by earlier DownBest builds.
+    let legacy_parts = destination.join(format!(".downbest-{id}"));
+    let _ = std::fs::remove_dir_all(legacy_parts);
+    let legacy_media = destination.join(format!(".downbest-work-{id}"));
+    let _ = std::fs::remove_dir_all(legacy_media);
 
     let site_job_suffix = if cfg!(target_os = "android") { id.to_string() } else { id.chars().take(8).collect() };
     let marker = format!(" - {site_job_suffix}.");
@@ -1795,7 +1801,7 @@ async fn download_http(
 ) -> Result<(), String> {
     let original_temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
     let previous_len = fs::metadata(&original_temp).await.map(|meta| meta.len()).unwrap_or(0);
-    let parts_dir = destination.join(format!(".downbest-{id}"));
+    let parts_dir = job_work_dir(id).join("http-parts");
     let (previous_etag, previous_modified) = saved_validators(manager, id);
     let probe = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -2041,7 +2047,7 @@ async fn download_segmented(
     total: u64, count: usize, progress: Arc<AtomicU64>,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let parts_dir = destination.join(format!(".downbest-{id}"));
+    let parts_dir = job_work_dir(id).join("http-parts");
     fs::create_dir_all(&parts_dir).await.map_err(|e| format!("Cannot create temporary folder: {e}"))?;
     let chunk_size = (total + count as u64 - 1) / count as u64;
     let mut existing_total = 0u64;
@@ -2243,6 +2249,7 @@ async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, 
     persist_records(manager);
     let workspace = destination.join(format!(".downbest-work-{id}"));
     let _ = fs::remove_dir_all(workspace).await;
+    let _ = fs::remove_dir_all(job_work_dir(id)).await;
     Ok(())
 }
 
@@ -2363,7 +2370,7 @@ async fn run_media_download(
         "yt-dlp was not found. Install yt-dlp or place it in the app's tools folder to download from media sites.".to_string())?;
     let has_ffmpeg = find_tool(app, "ffmpeg").is_some();
     let aria2 = find_tool(app, "aria2c");
-    let media_work_dir = destination.join(format!(".downbest-work-{id}"));
+    let media_work_dir = job_work_dir(id).join("media");
     fs::create_dir_all(&media_work_dir).await
         .map_err(|error| format!("Could not prepare private media download workspace: {error}"))?;
     let mut command = Command::new(&yt_dlp);
@@ -2478,7 +2485,7 @@ async fn run_media_download(
         match output {
             Some(path) if path.is_file() => {
                 set_file_path(manager, id, &path);
-                let _ = fs::remove_dir_all(&media_work_dir).await;
+                let _ = fs::remove_dir_all(job_work_dir(id)).await;
                 Ok(())
             }
             Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {}", path.display())),
