@@ -37,7 +37,7 @@ let autoProcessing = false;
 const autoAttempted = new Set<string>();
 const liveSamples = new Map<string, { bytes: number; at: number; lastMovingAt: number }>();
 const liveSpeeds = new Map<string, number>();
-const mediaDownloadIds = new Set<string>();
+const mediaDownloadIds = new Map<string, string>();
 
 const icons: Record<string, string> = {
   download: '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>',
@@ -132,7 +132,8 @@ function renderDownloads() {
 
   const query = document.querySelector<HTMLInputElement>("#download-search")!.value.trim().toLowerCase();
   const visible = downloads.filter(d => {
-    if (mediaDownloadIds.has(d.id)) return false;
+    const representedIdentity = mediaDownloadIds.get(d.id);
+    if (mediaAnalysis && representedIdentity && mediaAnalysis.entries.some(entry => mediaIdentityKey(entry.url) === representedIdentity)) return false;
     if (mediaAnalysis && mediaAnalysis.entries.some(entry => mediaIdentityKey(entry.url) === mediaIdentityKey(d.url))) return false;
     if (filter === "active" && finalStatus(d.status)) return false;
     if (filter === "completed" && d.status !== "Completed") return false;
@@ -289,6 +290,9 @@ function updateLiveSpeedSamples(next: Download[]) {
 async function refreshDownloads() {
   try {
     const next = await invoke<Download[]>("get_downloads");
+    for (const id of [...mediaDownloadIds.keys()]) {
+      if (!next.some(item => item.id === id)) mediaDownloadIds.delete(id);
+    }
     updateLiveSpeedSamples(next);
     downloads = next;
     renderDownloads();
@@ -797,9 +801,12 @@ async function downloadSelectedMedia() {
           cookies: null, formatSelector, mediaTitle: entry.title, mediaThumbnail: entry.thumbnail
         });
       }));
-      for (const result of results) {
-        if (result.status === "fulfilled") mediaDownloadIds.add(result.value.id);
-      }
+      results.forEach((result, resultIndex) => {
+        if (result.status === "fulfilled") {
+          const entry = mediaAnalysis?.entries[batch[resultIndex]];
+          if (entry) mediaDownloadIds.set(result.value.id, mediaIdentityKey(entry.url));
+        }
+      });
       added += results.filter(result => result.status === "fulfilled").length;
       failed += results.length - results.filter(result => result.status === "fulfilled").length;
       await refreshDownloads();
