@@ -202,7 +202,8 @@ function renderDownloads() {
       ["Connecting", "Extracting media", "Retrying", "Downloading"].includes(d.status) &&
       !progressKnown;
     const barWidth = done ? 100 : progressKnown ? pct : 0;
-    const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
+    const isMobileSavedFile = done && !!d.file_path &&
+      (d.file_path.startsWith("content://") || d.destination === "App downloads");
     const thumbnail = isMediaItem
       ? (mediaImage(d.media_thumbnail) || '<span class="transfer-media-placeholder">▶</span>')
       : '<span class="transfer-file-icon">' + (done ? icons.check : icons.file) + '</span>';
@@ -210,7 +211,7 @@ function renderDownloads() {
       ? d.status === "Cancelling" || d.status === "Pausing"
         ? '<span class="stopping-label">' + (d.status === "Cancelling" ? "Cancelling…" : "Pausing…") + '</span>'
         : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel">Cancel</button></div>'
-      : isPublicMobileFile
+      : isMobileSavedFile
         ? '<button class="open-button" data-open="' + safe(d.id) + '">' + icons.external + '<span>Open file</span></button>'
         : done && d.file_path && desktopFileActions
           ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
