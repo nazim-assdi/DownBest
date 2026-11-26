@@ -497,6 +497,36 @@ fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &
     }
 }
 
+fn apply_media_progress_values(
+    manager: &DownloadManager,
+    id: &str,
+    downloaded: Option<u64>,
+    total: Option<u64>,
+    speed: Option<u64>,
+) {
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            if let Some(value) = downloaded {
+                record.downloaded.store(value, Ordering::Relaxed);
+            }
+            if let Some(value) = total.filter(|value| *value > 0) {
+                record.total = Some(value);
+            }
+            if let Some(value) = speed {
+                record.speed_bytes_sec = value;
+            }
+            if downloaded.unwrap_or(0) > 0 || speed.unwrap_or(0) > 0 {
+                if record.status != "Downloading" {
+                    record.started = Instant::now();
+                }
+                record.status = "Downloading".into();
+                record.media_activity = Some("Downloading media".into());
+                record.error = None;
+            }
+        }
+    }
+}
+
 fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
     let fields: Vec<&str> = data.split('|').collect();
     let downloaded = fields.first().and_then(|value| value.parse::<u64>().ok());
@@ -504,24 +534,8 @@ fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
         .or_else(|| fields.get(2).and_then(|value| value.parse::<u64>().ok()));
     let speed = fields.get(3).and_then(|value| value.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| value.round() as u64).unwrap_or(0);
-    if let Ok(mut records) = manager.records.lock() {
-        if let Some(record) = records.get_mut(id) {
-            if let Some(value) = downloaded {
-                record.downloaded.store(value, Ordering::Relaxed);
-            }
-            if let Some(value) = total {
-                record.total = Some(value);
-            }
-            record.speed_bytes_sec = speed;
-            if downloaded.unwrap_or(0) > 0 && record.status != "Downloading" {
-                record.started = Instant::now();
-                record.status = "Downloading".into();
-                record.media_activity = Some("Downloading media".into());
-                record.error = None;
-            }
-        }
-    }
+        .map(|value| value.round() as u64);
+    apply_media_progress_values(manager, id, downloaded, total, speed);
 }
 
 fn parse_human_byte_count(raw: &str) -> Option<u64> {
@@ -576,33 +590,37 @@ fn parse_yt_dlp_progress_line(line: &str) -> Option<(Option<u64>, Option<u64>, O
     }
 }
 
+fn parse_aria2_progress_line(line: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
+    let start = line.find("[#")?;
+    let end = line[start..].find(']')? + start;
+    let progress = &line[start + 2..end];
+    let transfer = progress.split_whitespace()
+        .find(|value| value.contains('/') && value.contains('('))
+        .or_else(|| progress.split_whitespace().find(|value| value.contains('/')))?;
+    let (downloaded, total_and_percent) = transfer.split_once('/')?;
+    let total = total_and_percent.split('(').next().and_then(parse_human_byte_count);
+    let downloaded = parse_human_byte_count(downloaded);
+    let speed = progress.split_whitespace()
+        .find_map(|value| value.strip_prefix("DL:"))
+        .and_then(parse_human_byte_count);
+    if downloaded.is_none() && total.is_none() && speed.is_none() {
+        None
+    } else {
+        Some((downloaded, total, speed))
+    }
+}
+
 fn update_media_progress_from_line(manager: &DownloadManager, id: &str, line: &str) {
     if let Some(index) = line.find("__DOWNBEST__") {
         update_media_progress(manager, id, &line[index + "__DOWNBEST__".len()..]);
         return;
     }
+    if let Some((downloaded, total, speed)) = parse_aria2_progress_line(line) {
+        apply_media_progress_values(manager, id, downloaded, total, speed);
+        return;
+    }
     if let Some((downloaded, total, speed)) = parse_yt_dlp_progress_line(line) {
-        if let Ok(mut records) = manager.records.lock() {
-            if let Some(record) = records.get_mut(id) {
-                if let Some(value) = downloaded {
-                    record.downloaded.store(value, Ordering::Relaxed);
-                }
-                if let Some(value) = total {
-                    record.total = Some(value);
-                }
-                if let Some(value) = speed {
-                    record.speed_bytes_sec = value;
-                }
-                if downloaded.unwrap_or(0) > 0 || speed.unwrap_or(0) > 0 {
-                    if record.status != "Downloading" {
-                        record.started = Instant::now();
-                    }
-                    record.status = "Downloading".into();
-                    record.media_activity = Some("Downloading media".into());
-                    record.error = None;
-                }
-            }
-        }
+        apply_media_progress_values(manager, id, downloaded, total, speed);
     }
     set_media_activity_from_line(manager, id, line);
 }
@@ -2281,6 +2299,37 @@ fn find_completed_media_output(destination: &Path, id: &str) -> Option<PathBuf> 
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn consume_process_output<R, F>(stream: R, mut on_line: F)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    F: FnMut(String),
+{
+    let mut reader = BufReader::new(stream);
+    let mut buffer = [0u8; 4096];
+    let mut pending = Vec::new();
+
+    loop {
+        let count = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        for byte in &buffer[..count] {
+            if *byte == b'\\n' || *byte == b'\\r' {
+                if !pending.is_empty() {
+                    on_line(String::from_utf8_lossy(&pending).into_owned());
+                    pending.clear();
+                }
+            } else {
+                pending.push(*byte);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        on_line(String::from_utf8_lossy(&pending).into_owned());
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
     destination: &Path, concurrency: usize, cookies_file: Option<&str>,
@@ -2324,7 +2373,10 @@ async fn run_media_download(
         // handles DASH/HLS fragments so fragment scheduling remains protocol-aware.
         command.arg("--downloader").arg("aria2c")
             .arg("--downloader").arg("dash,m3u8:native")
-            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 1M", concurrency.clamp(2, 16), concurrency.clamp(2, 16)));
+            .arg("--downloader-args").arg(format!(
+                "aria2c:-c -x {} -s {} -k 1M --summary-interval=1 --show-console-readout=true",
+                concurrency.clamp(2, 16), concurrency.clamp(2, 16)
+            ));
         if let Some(parent) = aria_path.parent() {
             let mut paths = vec![parent.to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
@@ -2341,8 +2393,7 @@ async fn run_media_download(
     let stdout_manager = manager.clone();
     let stdout_id = id.to_string();
     let stdout_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        consume_process_output(stdout, |line| {
             if let Some(index) = line.find("__DOWNBEST_TITLE__") {
                 let title = line[index + "__DOWNBEST_TITLE__".len()..].trim();
                 if !title.is_empty() {
@@ -2356,25 +2407,24 @@ async fn run_media_download(
                 }
             }
             update_media_progress_from_line(&stdout_manager, &stdout_id, &line);
-        }
+        }).await;
     });
 
     let progress_manager = manager.clone();
     let progress_id = id.to_string();
     let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
         let mut captured = String::new();
-        while let Ok(Some(line)) = lines.next_line().await {
+        consume_process_output(stderr, |line| {
             update_media_progress_from_line(&progress_manager, &progress_id, &line);
             captured.push_str(&line);
-            captured.push('\n');
+            captured.push('\\n');
             if captured.len() > 16_000 {
                 let excess = captured.len() - 12_000;
                 let cut = captured.char_indices().find(|(index, _)| *index >= excess)
                     .map(|(index, _)| index).unwrap_or(captured.len());
                 captured.drain(..cut);
             }
-        }
+        }).await;
         captured
     });
 
@@ -2922,6 +2972,16 @@ mod lite_mode_tests {
         assert_eq!(final_line.0, Some(1_000_000));
         assert_eq!(final_line.1, Some(1_000_000));
         assert_eq!(final_line.2, Some(1_000_000));
+    }
+
+    #[test]
+    fn parses_aria2_progress_lines_for_live_media_cards() {
+        let parsed = super::parse_aria2_progress_line(
+            "[#8fcbad 1.7MiB/81MiB(2%) CN:16 DL:1.25MiB ETA:1m"
+        ).expect("parse aria2 progress");
+        assert_eq!(parsed.0, Some((1.7 * 1024.0 * 1024.0) as u64));
+        assert_eq!(parsed.1, Some(81 * 1024 * 1024));
+        assert_eq!(parsed.2, Some((1.25 * 1024.0 * 1024.0) as u64));
     }
 
     #[test]
