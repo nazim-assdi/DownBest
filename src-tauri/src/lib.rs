@@ -3008,9 +3008,11 @@ mod lite_mode_tests {
         let manager = DownloadManager::default();
         manager.restore_queue(queue_file.clone());
         let mut interrupted = queued_record("interrupted-job");
+        interrupted.url = "https://example.com/interrupted-file.zip".into();
         interrupted.status = "Downloading".into();
         interrupted.destination = folder.display().to_string();
         let mut manual_pause = queued_record("manual-pause-job");
+        manual_pause.url = "https://example.com/manual-pause-file.zip".into();
         manual_pause.status = "Paused".into();
         manager.records.lock().expect("lock original queue").extend([
             (interrupted.id.clone(), interrupted),
