@@ -145,8 +145,8 @@ function renderDownloads() {
   visible.sort((a, b) => rank(a) - rank(b));
 
   if (!visible.length) {
-    const emptyTitle = downloads.length ? "No downloads" : "No downloads yet";
-    list.innerHTML = '<div class="empty"><div>' + icons.download + '</div><b>' + emptyTitle + '</b></div>';
+    // Keep the queue clean when there are no items (or the current filter has no matches).
+    list.innerHTML = "";
     return;
   }
 
