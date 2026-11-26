@@ -1400,6 +1400,11 @@ fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
     for item in records.values().filter(|item| matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled")) {
         if let Some(path) = item.cookies_file.as_ref() { let _ = std::fs::remove_file(path); }
     }
+    for item in records.values().filter(|item| matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled")) {
+        let _ = std::fs::remove_dir_all(job_work_dir(&item.id));
+        let legacy = PathBuf::from(&item.destination).join(format!(".downbest-work-{}", item.id));
+        let _ = std::fs::remove_dir_all(legacy);
+    }
     records.retain(|_, item| !matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled"));
     drop(records);
     persist_records(manager.inner());
@@ -1480,6 +1485,7 @@ async fn execute_download(
     set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     set_status(&manager, &id, "Downloading", None);
     download_http(&client, &url, &mut target, &destination, &id, concurrency, &manager, &cancel).await?;
+    let _ = fs::remove_dir_all(job_work_dir(&id)).await;
     set_file_path(&manager, &id, &target);
     Ok(())
 }
