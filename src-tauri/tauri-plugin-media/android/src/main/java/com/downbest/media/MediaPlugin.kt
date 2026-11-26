@@ -92,10 +92,31 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
             throw IllegalStateException("Could not create the app Downloads folder.")
         }
         require(folder.isDirectory) { "The app Downloads location is not a folder." }
-        val target = File(folder, source.name)
-        if (source.absoluteFile != target.absoluteFile) {
-            source.inputStream().buffered().use { input ->
-                target.outputStream().buffered().use { output -> input.copyTo(output, 256 * 1024) }
+        val sourcePath = source.canonicalFile
+        var target = File(folder, source.name)
+        if (target.canonicalFile != sourcePath) {
+            if (!target.createNewFile()) {
+                val stem = source.nameWithoutExtension.ifBlank { "download" }
+                val extension = source.extension
+                var reserved: File? = null
+                for (index in 1..10_000) {
+                    val candidateName = if (extension.isBlank()) "$stem ($index)"
+                        else "$stem ($index).$extension"
+                    val candidate = File(folder, candidateName)
+                    if (candidate.createNewFile()) {
+                        reserved = candidate
+                        break
+                    }
+                }
+                target = reserved ?: throw IllegalStateException("Could not reserve a unique filename in app Downloads.")
+            }
+            try {
+                source.inputStream().buffered().use { input ->
+                    target.outputStream().buffered().use { output -> input.copyTo(output, 256 * 1024) }
+                }
+            } catch (error: Exception) {
+                target.delete()
+                throw error
             }
         }
         require(target.isFile && target.length() > 0L) {
