@@ -2118,7 +2118,16 @@ async fn download_piece(
             let _ = file.get_ref().sync_data().await;
             return Err("Cancelled".into());
         },
-        item = stream.next() => item,
+        item = tokio::time::timeout(std::time::Duration::from_secs(90), stream.next()) => {
+            match item {
+                Ok(item) => item,
+                Err(_) => {
+                    let _ = file.flush().await;
+                    let _ = file.get_ref().sync_data().await;
+                    return Err("Download stalled: no data was received for 90 seconds. The range part was saved; retry to continue.".into());
+                }
+            }
+        },
     } {
         let chunk = match item {
             Ok(chunk) => chunk,
