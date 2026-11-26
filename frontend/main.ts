@@ -131,6 +131,7 @@ function renderDownloads() {
 
   const query = document.querySelector<HTMLInputElement>("#download-search")!.value.trim().toLowerCase();
   const visible = downloads.filter(d => {
+    if (mediaAnalysis && mediaAnalysis.entries.some(entry => mediaIdentityKey(entry.url) === mediaIdentityKey(d.url))) return false;
     if (filter === "active" && finalStatus(d.status)) return false;
     if (filter === "completed" && d.status !== "Completed") return false;
     if (filter === "failed" && d.status !== "Failed") return false;
@@ -585,7 +586,6 @@ async function autoProcessPastedLinks() {
       };
       mediaFormats = [...new Map<string, MediaFormat>(formats.map(format => [format.formatId + "|" + format.resolution, format] as const)).values()];
       renderMediaLibrary();
-      renderMediaResolutionOptions(mediaFormats);
       if (mediaErrors.length) {
         const error = document.querySelector<HTMLElement>("#media-error")!;
         error.hidden = false;
