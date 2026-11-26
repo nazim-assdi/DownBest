@@ -350,7 +350,7 @@ fn partial_bytes_for(record: &DownloadRecord) -> u64 {
     ] {
         if let Ok(entries) = std::fs::read_dir(parts) {
             for entry in entries.flatten() {
-                if entry.file_name() == "manifest" { continue; }
+                if entry.file_name().to_string_lossy() == "manifest" { continue; }
                 let Ok(metadata) = entry.metadata() else { continue; };
                 if metadata.is_file() {
                     bytes = bytes.saturating_add(metadata.len());
@@ -1875,7 +1875,7 @@ async fn download_http(
         if count > 1 || has_segment_parts {
             drop(probe);
             let progress = progress_counter(manager, id)?;
-            match download_segmented(client, url, target.as_path(), destination, id, total, count, progress, cancel).await {
+            match download_segmented(client, url, target.as_path(), id, total, count, progress, cancel).await {
                 Ok(()) => Ok(()),
                 Err(error) if error == "Cancelled" => Err(error),
                 Err(error) if error.contains("stopped supporting parallel ranges") => {
@@ -2057,7 +2057,7 @@ async fn stream_to_target(
 }
 
 async fn download_segmented(
-    client: &Client, url: &str, target: &Path, destination: &Path, id: &str,
+    client: &Client, url: &str, target: &Path, id: &str,
     total: u64, count: usize, progress: Arc<AtomicU64>,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
