@@ -234,6 +234,20 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         return true
     }
 
+    private fun isYouTubeUrl(rawUrl: String): Boolean {
+        val host = Uri.parse(rawUrl).host?.lowercase()?.removePrefix("www.") ?: return false
+        return host == "youtu.be" || host == "youtube.com" || host.endsWith(".youtube.com") ||
+            host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com")
+    }
+
+    private fun addYouTubeClientFallbacks(request: YtDlpRequest, rawUrl: String) {
+        if (isYouTubeUrl(rawUrl)) {
+            // Avoid pinning every Android request to one client. These clients have
+            // different format/token support; yt-dlp can select from the available set.
+            request.addOption("--extractor-args", "youtube:player_client=web_safari,tv_simply,android")
+        }
+    }
+
     @Command
     fun inspect(invoke: Invoke) {
         val args = invoke.parseArgs(InspectArgs::class.java)
@@ -255,6 +269,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 if (args.flatPlaylist) request.addOption("--flat-playlist")
                 else request.addOption("--no-playlist")
                 val runtimeAvailable = addJavascriptRuntime(request)
+                addYouTubeClientFallbacks(request, args.url)
                 val response = YtDlp.executeAsync(request, DownloadProgressCallback { _, _, _ -> }).get(180, TimeUnit.SECONDS)
                 val result = JSObject()
                 result.put("output", response.output ?: "")
@@ -321,6 +336,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
 
                 addJavascriptRuntime(request)
+                addYouTubeClientFallbacks(request, args.url)
                 if (!args.cookiesFile.isNullOrBlank()) {
                     val cookieFile = File(args.cookiesFile!!)
                     require(cookieFile.isFile && cookieFile.canRead()) {
@@ -421,7 +437,15 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 }
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 if (!response.isSuccess) {
-                    throw IllegalStateException("yt-dlp failed with exit code ${response.exitCode}. Check whether the source requires sign-in, has changed, or blocks this downloader.")
+                    val diagnostics = listOf(response.errorOutput ?: "", response.output ?: "")
+                        .filter { it.isNotBlank() }
+                        .joinToString("\n")
+                        .takeLast(1800)
+                    throw IllegalStateException(
+                        "yt-dlp failed with exit code ${response.exitCode}. " +
+                            if (diagnostics.isNotBlank()) diagnostics
+                            else "The source may require sign-in or block this Android downloader."
+                    )
                 }
 
                 val jobMarker = " - ${args.jobId}."
