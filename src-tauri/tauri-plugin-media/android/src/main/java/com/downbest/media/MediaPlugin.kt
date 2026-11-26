@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -60,6 +61,11 @@ class InspectArgs {
 
 @TauriPlugin
 class MediaPlugin(private val activity: Activity) : Plugin(activity) {
+    companion object {
+        private val ytdlpInitLock = Any()
+        @Volatile private var ytdlpInitialized = false
+    }
+
     private val activeDownloads = ConcurrentHashMap<String, Future<*>>()
     private val jobGenerations = ConcurrentHashMap<String, Long>()
     private val cancelledGenerations = ConcurrentHashMap<String, Long>()
@@ -79,48 +85,92 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(result)
     }
 
+    private fun copyToAppDownloads(source: File): File {
+        val folder = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: File(activity.filesDir, "Downloads")
+        if (!folder.exists() && !folder.mkdirs()) {
+            throw IllegalStateException("Could not create the app Downloads folder.")
+        }
+        require(folder.isDirectory) { "The app Downloads location is not a folder." }
+        val target = File(folder, source.name)
+        if (source.absoluteFile != target.absoluteFile) {
+            source.inputStream().buffered().use { input ->
+                target.outputStream().buffered().use { output -> input.copyTo(output, 256 * 1024) }
+            }
+        }
+        require(target.isFile && target.length() > 0L) {
+            "The downloaded file could not be copied to the app Downloads folder."
+        }
+        return target
+    }
+
     @Command
     fun publishDownload(invoke: Invoke) {
         val args = invoke.parseArgs(PublishDownloadArgs::class.java)
         Thread({
             var publishedUri: Uri? = null
             try {
-                require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    "Saving into the shared Downloads folder requires Android 10 or later."
-                }
                 val source = File(args.filePath)
                 require(source.isFile && source.canRead()) {
                     "The finished file is missing from temporary storage."
                 }
-                val mimeType = MimeTypeMap.getSingleton()
-                    .getMimeTypeFromExtension(source.extension.lowercase())
-                    ?: "application/octet-stream"
-                val values = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, source.name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val mimeType = MimeTypeMap.getSingleton()
+                        .getMimeTypeFromExtension(source.extension.lowercase())
+                        ?: "application/octet-stream"
+                    val values = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, source.name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val resolver = activity.contentResolver
+                    publishedUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: throw IllegalStateException("Android could not create a file in the Downloads folder.")
+                    val destination = resolver.openOutputStream(publishedUri!!, "w")
+                        ?: throw IllegalStateException("Android could not open the new Downloads file.")
+                    source.inputStream().buffered().use { input ->
+                        destination.buffered().use { output -> input.copyTo(output, 256 * 1024) }
+                    }
+                    val ready = ContentValues().apply {
+                        put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    }
+                    resolver.update(publishedUri!!, ready, null, null)
+                    val result = JSObject()
+                    result.put("contentUri", publishedUri.toString())
+                    result.put("fileName", source.name)
+                    source.delete()
+                    invoke.resolve(result)
+                } else {
+                    // Android 7–9 cannot use MediaStore.Downloads/RELATIVE_PATH.
+                    val fallback = copyToAppDownloads(source)
+                    val result = JSObject()
+                    result.put("contentUri", fallback.absolutePath)
+                    result.put("fileName", fallback.name)
+                    source.delete()
+                    invoke.resolve(result)
                 }
-                val resolver = activity.contentResolver
-                publishedUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                    ?: throw IllegalStateException("Android could not create a file in the Downloads folder.")
-                val destination = resolver.openOutputStream(publishedUri!!, "w")
-                    ?: throw IllegalStateException("Android could not open the new Downloads file.")
-                source.inputStream().buffered().use { input ->
-                    destination.buffered().use { output -> input.copyTo(output, 256 * 1024) }
-                }
-                val ready = ContentValues().apply {
-                    put(MediaStore.MediaColumns.IS_PENDING, 0)
-                }
-                resolver.update(publishedUri!!, ready, null, null)
-                val result = JSObject()
-                result.put("contentUri", publishedUri.toString())
-                result.put("fileName", source.name)
-                source.delete()
-                invoke.resolve(result)
             } catch (error: Exception) {
                 publishedUri?.let { activity.contentResolver.delete(it, null, null) }
-                invoke.reject(error.message ?: "Could not save the finished file to Downloads.")
+                try {
+                    // Keep a successful transfer Completed if the shared Downloads
+                    // provider rejects the final copy on a particular Android build.
+                    val source = File(args.filePath)
+                    require(source.isFile && source.canRead()) {
+                        "The finished file is missing from temporary storage."
+                    }
+                    val fallback = copyToAppDownloads(source)
+                    val result = JSObject()
+                    result.put("contentUri", fallback.absolutePath)
+                    result.put("fileName", fallback.name)
+                    source.delete()
+                    invoke.resolve(result)
+                } catch (fallbackError: Exception) {
+                    invoke.reject(
+                        "Downloads save failed: ${error.message ?: "unknown storage error"}. " +
+                            "App storage fallback failed: ${fallbackError.message ?: "unknown error"}."
+                    )
+                }
             }
         }, "DownBest-publish-download").start()
     }
@@ -130,9 +180,23 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(OpenDownloadArgs::class.java)
         activity.runOnUiThread {
             try {
-                val uri = Uri.parse(args.contentUri)
-                require(uri.scheme == "content") { "The saved file location is invalid." }
-                val mimeType = activity.contentResolver.getType(uri) ?: "application/octet-stream"
+                val raw = args.contentUri
+                val uri = if (raw.startsWith("content://")) {
+                    Uri.parse(raw)
+                } else {
+                    val file = File(raw)
+                    require(file.isFile && file.canRead()) { "The downloaded file is no longer available." }
+                    FileProvider.getUriForFile(
+                        activity,
+                        "${activity.packageName}.downbest.media.fileprovider",
+                        file
+                    )
+                }
+                val mimeType = activity.contentResolver.getType(uri)
+                    ?: MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                        MimeTypeMap.getFileExtensionFromUrl(uri.toString()).lowercase()
+                    )
+                    ?: "application/octet-stream"
                 val view = Intent(Intent.ACTION_VIEW).setDataAndType(uri, mimeType)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 activity.startActivity(Intent.createChooser(view, "Open downloaded file"))
@@ -145,36 +209,6 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
-    private fun javascriptRuntimePath(): String? {
-        val abi = Build.SUPPORTED_ABIS.firstOrNull { it == "arm64-v8a" || it == "x86_64" }
-            ?: return null
-        val runtime = File(activity.applicationInfo.nativeLibraryDir, "libqjs.so")
-        if (runtime.isFile && !runtime.canExecute()) runtime.setExecutable(true, false)
-        return runtime.absolutePath.takeIf { runtime.isFile && runtime.canExecute() }
-    }
-
-    private fun addJavascriptRuntime(request: YtDlpRequest): Boolean {
-        val runtime = javascriptRuntimePath() ?: return false
-        request.addOption("--js-runtimes", "quickjs:$runtime")
-        request.addOption("--remote-components", "ejs:github")
-        return true
-    }
-
-    private fun isYouTubeUrl(rawUrl: String): Boolean {
-        val host = Uri.parse(rawUrl).host?.lowercase()?.removePrefix("www.") ?: return false
-        return host == "youtu.be" || host == "youtube.com" || host.endsWith(".youtube.com") ||
-            host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com")
-    }
-
-    private fun addYouTubeAndroidClient(request: YtDlpRequest, rawUrl: String) {
-        if (isYouTubeUrl(rawUrl)) {
-            // YouTube's default Android VR player can return video CDN URLs that
-            // are rejected with HTTP 403. The regular Android player client is a
-            // known workaround; keep the extractor's normal format selection.
-            request.addOption("--extractor-args", "youtube:player_client=android")
-        }
-    }
-
     @Command
     fun inspect(invoke: Invoke) {
         val args = invoke.parseArgs(InspectArgs::class.java)
@@ -183,7 +217,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 require(args.url.startsWith("https://") || args.url.startsWith("http://")) {
                     "Only HTTP and HTTPS media links are supported."
                 }
-                YtDlp.init(activity.applicationContext)
+                ensureYtDlpInitialized()
                 val request = YtDlpRequest(args.url)
                     .addOption("--dump-single-json")
                     .addOption("--skip-download")
@@ -196,7 +230,6 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 if (args.flatPlaylist) request.addOption("--flat-playlist")
                 else request.addOption("--no-playlist")
                 val runtimeAvailable = addJavascriptRuntime(request)
-                addYouTubeAndroidClient(request, args.url)
                 val response = YtDlp.executeAsync(request, DownloadProgressCallback { _, _, _ -> }).get(180, TimeUnit.SECONDS)
                 val result = JSObject()
                 result.put("output", response.output ?: "")
@@ -235,7 +268,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     "The download job identifier is invalid."
                 }
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
-                YtDlp.init(activity.applicationContext)
+                ensureYtDlpInitialized()
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 val template = File(folder, "%(title).180B [%(id)s] - ${args.jobId}.%(ext)s").absolutePath
                 val request = YtDlpRequest(args.url)
@@ -250,7 +283,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     .addOption("--extractor-retries", "2")
                     .addOption("--file-access-retries", "2")
                     .addOption("--concurrent-fragments", args.concurrency.coerceIn(1, 16).toString())
-                    .addOption("--buffer-size", "16K")
+                    .addOption("--buffer-size", "1M")
                     .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
 
                 addJavascriptRuntime(request)
