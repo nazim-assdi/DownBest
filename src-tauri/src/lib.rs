@@ -2207,10 +2207,14 @@ async fn run_media_download(
 
 #[cfg(target_os = "android")]
 async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, id: &str) -> Result<(), String> {
-    let source_path = {
+    let (source_path, destination) = {
         let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
-        records.get(id).and_then(|record| record.file_path.clone())
-            .ok_or_else(|| "The completed download has no output file to publish.".to_string())?
+        let record = records.get(id).ok_or_else(|| "Download record was not found.".to_string())?;
+        (
+            record.file_path.clone()
+                .ok_or_else(|| "The completed download has no output file to publish.".to_string())?,
+            PathBuf::from(&record.destination),
+        )
     };
     if !Path::new(&source_path).is_file() {
         return Err("The finished file is missing before it could be copied to Downloads.".into());
@@ -2237,6 +2241,8 @@ async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, 
         }
     }
     persist_records(manager);
+    let workspace = destination.join(format!(".downbest-work-{id}"));
+    let _ = fs::remove_dir_all(workspace).await;
     Ok(())
 }
 
