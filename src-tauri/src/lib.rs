@@ -2315,7 +2315,7 @@ where
             Ok(count) => count,
         };
         for byte in &buffer[..count] {
-            if *byte == b'\\n' || *byte == b'\\r' {
+            if *byte == b'\n' || *byte == b'\r' {
                 if !pending.is_empty() {
                     on_line(String::from_utf8_lossy(&pending).into_owned());
                     pending.clear();
@@ -2418,7 +2418,7 @@ async fn run_media_download(
         consume_process_output(stderr, |line| {
             update_media_progress_from_line(&progress_manager, &progress_id, &line);
             captured.push_str(&line);
-            captured.push('\\n');
+            captured.push('\n');
             if captured.len() > 16_000 {
                 let excess = captured.len() - 12_000;
                 let cut = captured.char_indices().find(|(index, _)| *index >= excess)
@@ -2979,7 +2979,7 @@ mod lite_mode_tests {
     #[test]
     fn parses_aria2_progress_lines_for_live_media_cards() {
         let parsed = super::parse_aria2_progress_line(
-            "[#8fcbad 1.7MiB/81MiB(2%) CN:16 DL:1.25MiB ETA:1m"
+            "[#8fcbad 1.7MiB/81MiB(2%) CN:16 DL:1.25MiB ETA:1m]"
         ).expect("parse aria2 progress");
         assert_eq!(parsed.0, Some((1.7 * 1024.0 * 1024.0) as u64));
         assert_eq!(parsed.1, Some(81 * 1024 * 1024));
