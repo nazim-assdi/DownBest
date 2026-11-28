@@ -152,9 +152,7 @@ jobs:
             cmake --build "$build" --target qjs_exe -j2
             qjs_bin="$build/qjs"
             test -x "$qjs_bin"
-            if [[ "$abi" == "arm64-v8a" ]]; then
-              "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*AArch64"
-
+            "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*AArch64"
             mkdir -p "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi"
             cp "$qjs_bin" "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
             chmod 755 "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
