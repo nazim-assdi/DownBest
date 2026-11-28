@@ -607,9 +607,9 @@ async function autoProcessPastedLinks() {
         const rawError = mediaErrors.join(" · ");
         const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
         const details = rawError
-          .replace(/^[^:]{1,100}:\\s*/, "")
-          .replace(/^(?:Error|Exception):\\s*/i, "")
-          .replace(/\\s+/g, " ")
+          .replace(/^[^:]{1,100}:\s*/, "")
+          .replace(/^(?:Error|Exception):\s*/i, "")
+          .replace(/\s+/g, " ")
           .trim()
           .slice(0, 420);
         document.querySelector<HTMLElement>("#media-title")!.textContent = "Unavailable";
