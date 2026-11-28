@@ -117,15 +117,15 @@ jobs:
                   "android {\n    packaging { jniLibs { useLegacyPackaging = true } }\n",
                   1
               )
-          abi_match = re.search(r'(?m)^(\\s*abiFilters\\s*\\+=\\s*)listOf\\([^)]*\\)', content)
+          abi_match = re.search(r'(?m)^(\s*abiFilters\s*\+=\s*)listOf\([^)]*\)', content)
           if abi_match:
               content = content[:abi_match.start()] + abi_match.group(1) + 'listOf("arm64-v8a")' + content[abi_match.end():]
           else:
-              match = re.search(r"(?m)^(\\s*defaultConfig\\s*\\{)", content)
+              match = re.search(r"(?m)^(\s*defaultConfig\s*\{)", content)
               if not match:
                   raise SystemExit("Could not find defaultConfig in build.gradle.kts")
               pos = match.end()
-              content = content[:pos] + '\\n        ndk { abiFilters += listOf("arm64-v8a") }' + content[pos:]
+              content = content[:pos] + '\n        ndk { abiFilters += listOf("arm64-v8a") }' + content[pos:]
           if re.search(r'abiFilters.*(x86|armeabi|arm32)', content):
               raise SystemExit("Non-ARM64 Android ABI filters remain configured.")
           gradle.write_text(content)
