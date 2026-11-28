@@ -476,8 +476,6 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     maxHeight != null -> "best[height<=$maxHeight][ext=mp4][acodec!=none]/best[height<=$maxHeight][acodec!=none]"
                     else -> "best[ext=mp4][acodec!=none]/best[acodec!=none]"
                 }
-                request.addOption("-f", selectedFormat)
-
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 val progressSpeedLock = Any()
                 var lastProgressBytes = 0L
