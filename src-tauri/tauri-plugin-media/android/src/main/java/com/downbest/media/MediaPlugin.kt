@@ -391,27 +391,6 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         return runtime.absolutePath.takeIf { runtime.isFile && runtime.canExecute() }
     }
 
-    private fun addJavascriptRuntime(request: YtDlpRequest): Boolean {
-        val runtime = javascriptRuntimePath() ?: return false
-        request.addOption("--js-runtimes", "quickjs:$runtime")
-        request.addOption("--remote-components", "ejs:github")
-        return true
-    }
-
-    private fun isYouTubeUrl(rawUrl: String): Boolean {
-        val host = Uri.parse(rawUrl).host?.lowercase()?.removePrefix("www.") ?: return false
-        return host == "youtu.be" || host == "youtube.com" || host.endsWith(".youtube.com") ||
-            host == "youtube-nocookie.com" || host.endsWith(".youtube-nocookie.com")
-    }
-
-    private fun addYouTubeClientFallbacks(request: YtDlpRequest, rawUrl: String) {
-        if (isYouTubeUrl(rawUrl)) {
-            // Avoid pinning every Android request to one client. These clients have
-            // different format/token support; yt-dlp can select from the available set.
-            request.addOption("--extractor-args", "youtube:player_client=web_safari,tv_simply,android")
-        }
-    }
-
     @Command
     fun inspect(invoke: Invoke) {
         val args = invoke.parseArgs(InspectArgs::class.java)
