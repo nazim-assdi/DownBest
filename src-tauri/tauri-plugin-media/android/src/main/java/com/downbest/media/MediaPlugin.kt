@@ -416,8 +416,23 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 result.put("exitCode", 0)
                 invoke.resolve(result)
             } catch (error: Exception) {
-                val message = error.cause?.message ?: error.message ?: "Could not inspect this media link."
-                invoke.reject(message)
+                // Reflection wraps Python exceptions in one or more Java exceptions.
+                // Unwrap to the real yt-dlp/Chaquopy cause so the UI can explain failures.
+                var root = error as Throwable
+                val visited = HashSet<Throwable>()
+                while (root.cause != null && root.cause !== root && visited.add(root)) {
+                    root = root.cause!!
+                }
+                val message = root.message?.takeIf { it.isNotBlank() } ?: root.toString()
+                val runtimeInfo = if (pythonRunnerReady) {
+                    try { pythonRunnerCall("get_capabilities") } catch (_: Exception) { "" }
+                } else ""
+                val detail = if (runtimeInfo.isNotBlank()) {
+                    "$message (Android extractor: $runtimeInfo)"
+                } else {
+                    message
+                }
+                invoke.reject(detail)
             }
         }, "DownBest-media-inspect").start()
     }
