@@ -14,6 +14,15 @@ from typing import Any
 from yt_dlp import YoutubeDL
 
 
+def _java_thread_interrupted() -> bool:
+    """Return whether the current Chaquopy worker thread was interrupted."""
+    try:
+        from java.lang import Thread
+        return bool(Thread.currentThread().isInterrupted())
+    except Exception:
+        return False
+
+
 def _format_bytes(value: Any) -> str:
     if value is None:
         return "0B"
@@ -120,6 +129,8 @@ def download(url: str, output_template: str, format_selector: str,
 
     if progress_callback is not None:
         def progress_hook(data: dict[str, Any]) -> None:
+            if _java_thread_interrupted():
+                raise KeyboardInterrupt("Download cancelled.")
             if data.get("status") != "downloading":
                 return
             try:
@@ -135,9 +146,11 @@ def download(url: str, output_template: str, format_selector: str,
                     f"at {_format_bytes(speed)}/s"
                 )
                 progress_callback.onProgressUpdate(percent_value, eta, line)
-            except Exception:
-                # Progress UI must never abort the actual transfer.
-                pass
+            except Exception as error:
+                # A normal UI callback failure must not abort the transfer, but
+                # an interrupted Java worker must unwind yt-dlp for Pause/Cancel.
+                if _java_thread_interrupted() or "Download cancelled" in str(error):
+                    raise KeyboardInterrupt("Download cancelled.") from error
 
         options["progress_hooks"].append(progress_hook)
 
