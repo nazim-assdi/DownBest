@@ -294,6 +294,13 @@ fn job_work_dir(id: &str) -> PathBuf {
     std::env::temp_dir().join("DownBest").join("work").join(id)
 }
 
+fn cleanup_job_workspaces(destination: &Path, id: &str) {
+    let _ = std::fs::remove_dir_all(job_work_dir(id));
+    // Remove temporary folders used by both the current and older releases.
+    let _ = std::fs::remove_dir_all(destination.join(format!(".downbest-{id}")));
+    let _ = std::fs::remove_dir_all(destination.join(format!(".downbest-work-{id}")));
+}
+
 fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
     let (destination, file_path) = match manager.records.lock() {
         Ok(records) => match records.get(id) {
@@ -775,6 +782,7 @@ fn spawn_download_task(
         let _ = saver.await;
         match result {
             Ok(()) => {
+                cleanup_job_workspaces(&destination, &id);
                 set_status(&manager, &id, "Completed", None);
                 cleanup_job_cookies(&manager, &id);
             },
@@ -1412,9 +1420,7 @@ fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
         if let Some(path) = item.cookies_file.as_ref() { let _ = std::fs::remove_file(path); }
     }
     for item in records.values().filter(|item| matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled")) {
-        let _ = std::fs::remove_dir_all(job_work_dir(&item.id));
-        let legacy = PathBuf::from(&item.destination).join(format!(".downbest-work-{}", item.id));
-        let _ = std::fs::remove_dir_all(legacy);
+        cleanup_job_workspaces(Path::new(&item.destination), &item.id);
     }
     records.retain(|_, item| !matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled"));
     drop(records);
