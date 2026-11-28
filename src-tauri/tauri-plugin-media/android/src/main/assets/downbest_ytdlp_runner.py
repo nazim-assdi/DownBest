@@ -74,12 +74,17 @@ def _base_options(cookie_file: str = "", quickjs_path: str = "",
 
 def get_capabilities() -> str:
     try:
+        import yt_dlp
+        yt_dlp_version = getattr(yt_dlp, "__version__", "unknown")
+    except Exception as error:
+        yt_dlp_version = f"unavailable: {error}"
+    try:
         import curl_cffi
         curl_version = getattr(curl_cffi, "__version__", "available")
     except Exception as error:
         curl_version = f"unavailable: {error}"
     return json.dumps({
-        "yt_dlp_version": getattr(__import__("yt_dlp"), "version", None).__version__,
+        "yt_dlp_version": yt_dlp_version,
         "curl_cffi": curl_version,
     }, ensure_ascii=False)
 
