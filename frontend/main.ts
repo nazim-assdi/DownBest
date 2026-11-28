@@ -19,7 +19,6 @@ type Download = {
   media_thumbnail: string | null;
   media_activity: string | null;
 };
-type Tool = { name: string; available: boolean; version: string | null };
 type MediaEntry = { id: string; title: string; url: string; thumbnail: string | null; duration: number | null; playlistIndex: number | null };
 type MediaAnalysis = { title: string; url: string; extractor: string; uploader: string | null; thumbnail: string | null; duration: number | null; isPlaylist: boolean; entryCount: number; entries: MediaEntry[] };
 type MediaFormat = { formatId: string; ext: string; resolution: string; width: number | null; height: number | null; fps: number | null; filesize: number | null; formatNote: string | null; vcodec: string; acodec: string; isVideo: boolean; isAudio: boolean };
@@ -36,8 +35,9 @@ let mediaAnalyzing = false;
 let autoProcessTimer: number | undefined;
 let autoProcessing = false;
 const autoAttempted = new Set<string>();
-const liveSamples = new Map<string, { bytes: number; at: number }>();
+const liveSamples = new Map<string, { bytes: number; at: number; lastMovingAt: number }>();
 const liveSpeeds = new Map<string, number>();
+const mediaDownloadIds = new Map<string, string>();
 
 const icons: Record<string, string> = {
   download: '<svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>',
@@ -84,41 +84,25 @@ function toast(message: string, error = false) {
 root.innerHTML = [
   '<div class="layout">',
   '<aside class="sidebar">',
-  '<div class="brand"><div class="brand-mark">D</div><div><b>DownBest <span>Lite</span></b><small>SMART DOWNLOAD MANAGER</small></div></div>',
-  '<div class="side-label">WORKSPACE</div>',
+  '<div class="brand"><div class="brand-mark">D</div><div><b>DownBest</b></div></div>',
   '<button class="nav active" type="button"><span class="nav-icon">' + icons.download + '</span><span>Downloads</span><b id="active-count">0</b></button>',
-  '<div class="side-tip"><div class="tip-icon">' + icons.bolt + '</div><b>Lite engine</b><p>Low resource usage with parallel queue processing and live transfer updates.</p></div>',
-  '<div class="sidebar-info"><span>LIVE DOWNLOADS</span><b id="sidebar-active">0 running</b><small id="sidebar-queued">0 waiting · max 2 parallel jobs</small></div>',
-  '<div class="sidebar-foot"><span>PRIVATE BY DESIGN</span><small>DOWNBEST LITE 1.2.0</small></div>',
   '</aside>',
   '<main class="main">',
-  '<header><div><span class="eyebrow">YOUR DOWNLOAD WORKSPACE</span><h1>Download center</h1><p class="header-subtitle">A calmer place to manage every transfer.</p></div><div class="right-head"><i id="engine-dot"></i><span id="engine-state">Engine ready</span><button id="appearance" class="appearance-button" type="button" title="Appearance settings" aria-expanded="false">' + icons.settings + '<span>Appearance</span></button><button id="refresh" class="refresh-button" title="Refresh downloads">' + icons.refresh + '</button></div></header>',
-  '<section id="appearance-panel" class="appearance-panel" hidden aria-label="Appearance settings"><div class="appearance-heading"><div><span class="eyebrow">PERSONAL COMFORT</span><h2>Appearance</h2><p>Choose a softer view for long sessions.</p></div><button id="close-appearance" class="close-appearance" type="button" aria-label="Close appearance settings">×</button></div><div class="theme-options"><button class="theme-option" type="button" data-theme-choice="eye" aria-pressed="true"><span class="theme-preview preview-eye"><i></i><b></b><em></em></span><span><b>Eye comfort</b><small>Warm sage · low glare</small></span><span class="theme-check">✓</span></button><button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false"><span class="theme-preview preview-dark"><i></i><b></b><em></em></span><span><b>Midnight</b><small>Deep dark · crisp</small></span><span class="theme-check">✓</span></button><button class="theme-option" type="button" data-theme-choice="light" aria-pressed="false"><span class="theme-preview preview-light"><i></i><b></b><em></em></span><span><b>Soft light</b><small>Warm paper · gentle contrast</small></span><span class="theme-check">✓</span></button></div><div class="comfort-controls"><label class="toggle-row"><span><b>Reduce motion</b><small>Limit animated interface elements</small></span><input id="reduce-motion" type="checkbox"><i></i></label><label class="toggle-row"><span><b>Larger text</b><small>Make labels and details easier to read</small></span><input id="large-text" type="checkbox"><i></i></label></div><p class="appearance-note">' + icons.eye + '<span>Eye Comfort is the default theme. Your settings stay on this device.</span></p></section>',  '<section class="hero"><div class="hero-copy"><span class="chip"><i></i> LITE ENGINE · LOW CPU</span><h2>Everything downloading,<br><em>all in one place.</em></h2><p>Queue multiple links, watch every transfer live, and find completed files without searching through folders.</p><div class="stats"><div><b id="stat-active">0</b><small>Active now</small></div><div><b id="stat-completed">0</b><small>Completed</small></div><div><b>2</b><small>Parallel jobs</small></div></div></div><div class="hero-visual"><div class="visual-grid"></div><div class="orbit orbit-a"></div><div class="orbit orbit-b"></div><div class="hero-core">' + icons.download + '<b>DB</b><small>LIVE ENGINE</small></div><span class="float-tag tag-a">HTTP / HTTPS</span><span class="float-tag tag-b">YT-DLP</span><span class="float-tag tag-c">QUEUE ACTIVE</span></div></section>',
-  '<section class="panel composer"><div class="section-top"><div><span class="eyebrow">SMART LINK DETECTION</span><h2>Paste a link to get started</h2><p>Direct files start downloading automatically. YouTube, Facebook and supported media links open in the Media Library.</p></div><span class="step">01</span></div>',
-  '<div id="download-form"><div class="url-label-row"><label for="urls">PASTE DOWNLOAD LINK</label><span id="url-count">0 links detected</span></div><div class="urlbox"><span>' + icons.link + '</span><textarea id="urls" rows="3" placeholder="Paste a direct file, YouTube, Facebook or supported video link…"></textarea></div><div class="auto-detect-hint"><i></i><span id="auto-status">Ready · paste a link and DownBest will detect it automatically.</span></div>',
+  '<header><h1>Downloads</h1><div class="right-head"><button id="appearance" class="appearance-button" type="button" title="Appearance" aria-expanded="false">' + icons.settings + '<span>Appearance</span></button><button id="refresh" class="refresh-button" title="Refresh">' + icons.refresh + '</button></div></header>',
+  '<section id="appearance-panel" class="appearance-panel" hidden aria-label="Appearance settings"><div class="appearance-heading"><div><h2>Appearance</h2></div><button id="close-appearance" class="close-appearance" type="button" aria-label="Close appearance settings">×</button></div><div class="theme-options"><button class="theme-option" type="button" data-theme-choice="eye" aria-pressed="true"><span class="theme-preview preview-eye"><i></i><b></b><em></em></span><span><b>Eye comfort</b></span><span class="theme-check">✓</span></button><button class="theme-option" type="button" data-theme-choice="dark" aria-pressed="false"><span class="theme-preview preview-dark"><i></i><b></b><em></em></span><span><b>Dark</b></span><span class="theme-check">✓</span></button><button class="theme-option" type="button" data-theme-choice="light" aria-pressed="false"><span class="theme-preview preview-light"><i></i><b></b><em></em></span><span><b>Light</b></span><span class="theme-check">✓</span></button></div><div class="comfort-controls"><label class="toggle-row"><span><b>Reduce motion</b></span><input id="reduce-motion" type="checkbox"><i></i></label><label class="toggle-row"><span><b>Larger text</b></span><input id="large-text" type="checkbox"><i></i></label></div></section>',  '<section class="panel composer"><div class="section-top"><h2>Add links</h2></div>',
+  '<div id="download-form"><div class="url-label-row"><label for="urls">LINKS</label><span id="url-count">0</span></div><div class="urlbox"><span>' + icons.link + '</span><textarea id="urls" rows="3" placeholder="Paste links here, one per line…"></textarea></div><div class="auto-detect-hint" id="auto-status-wrap" hidden><i></i><span id="auto-status"></span></div>',
   '<div class="fields">',
-  '<div><label for="concurrency">PER-FILE SPEED PROFILE</label><select id="concurrency"><option value="2">Lite · Low CPU · 2 connections</option><option value="4">Balanced · 4 connections</option><option value="8" selected>High throughput · 8 connections (default)</option><option value="16">Turbo · Up to 16 connections</option></select></div>',
-  '<div class="destination"><label for="destination">SAVE LOCATION</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Default: System Downloads"><button id="choose-folder" type="button">Browse</button></div></div></div>',
-  '<div class="composer-bottom"><p class="note" id="save-location-note">Default save location: System Downloads. Downloads begin automatically after link detection; use the Media Library Download button for videos.</p></div></div></section>',
-  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><div><span class="eyebrow">MEDIA LIBRARY</span><h2 id="media-title">Media collection</h2><p id="media-subtitle">Paste a media link to inspect available videos.</p></div><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-preview-row"><div id="media-preview-thumb" class="media-preview-thumb"><span>▶</span></div><div class="media-quality media-quality-inline"><label for="media-quality-select">DOWNLOAD MODE<select id="media-quality-select"><option value="">Default · best video + audio</option><option value="audio">Audio only</option></select></label><label for="media-resolution-select">VIDEO RESOLUTION<select id="media-resolution-select" disabled><option value="">Auto · best available</option></select></label><div class="media-quality-note"><small id="media-format-summary">Default downloads the best available video with audio.</small><small id="media-resolution-summary">Available resolutions will appear here.</small></div></div></div><div class="media-library-controls"><div class="media-select-tools"><span id="media-entry-count">0 media items</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
-  '<section class="engine-strip"><div class="engine-title"><span class="eyebrow">DOWNLOAD ENGINES</span><b>Ready for your links</b></div><div id="engine-list"><span class="engine-loading">Checking installed tools…</span></div></section>',
-  '<section class="queue"><div class="queue-head"><div><span class="eyebrow">TRANSFER ACTIVITY</span><h2>Your download queue <i id="queue-count">0</i></h2></div><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
+  '<div><label for="concurrency">SPEED</label><select id="concurrency"><option value="2">Low · 2 connections</option><option value="4">Balanced · 4 connections</option><option value="8">Fast · 8 connections</option><option value="16" selected>Max · 16 connections</option></select></div>',
+  '<div class="destination"><label for="destination">SAVE TO</label><div class="destination-control"><span>' + icons.folder + '</span><input id="destination" type="text" placeholder="Downloads"><button id="choose-folder" type="button">Browse</button></div></div></div>',
+  '</div></section>',
+  '<section id="media-library" class="media-library" hidden><div class="media-library-top"><h2 id="media-title">Media</h2><button id="close-media-library" class="media-close" type="button" aria-label="Close media library">×</button></div><div id="media-error" class="media-error" hidden></div><div class="media-preview-row"><div id="media-preview-thumb" class="media-preview-thumb"><span>▶</span></div><div class="media-preview-caption"><b id="media-preview-title">Select items</b><small>Choose format and resolution on each item.</small></div></div><div class="media-library-controls"><div class="media-select-tools"><span id="media-entry-count">0 items</span><button id="select-all-media" type="button">Select all</button><button id="clear-all-media" type="button">Clear</button></div></div><div id="media-entry-list" class="media-entry-list"></div><div class="media-library-bottom"><span id="media-selection-summary">0 selected</span><button id="download-selected-media" class="primary-button" type="button" disabled>Download selected</button></div></section>',
+
+  '<section class="queue"><div class="queue-head"><h2>Queue <i id="queue-count">0</i></h2><button id="clear" class="clear-button" type="button">Clear finished</button></div>',
   '<div class="queue-toolbar"><div class="filter-tabs"><button type="button" class="filter active" data-filter="all">All <span id="count-all">0</span></button><button type="button" class="filter" data-filter="active">Active <span id="count-active">0</span></button><button type="button" class="filter" data-filter="completed">Completed <span id="count-completed">0</span></button><button type="button" class="filter" data-filter="failed">Failed <span id="count-failed">0</span></button></div><div class="searchbox">' + icons.search + '<input id="download-search" type="search" placeholder="Search downloads"></div></div>',
   '<div id="download-list" class="download-list"></div></section>',
-  '<footer><span>DOWNBEST LITE · Fast downloads, lighter CPU use.</span><span>Windows · macOS · Linux · Android · iOS</span></footer>',
   '</main></div><div id="toast" class="toast"></div>'
 ].join("");
 
-function renderTools(tools: Tool[]) {
-  const el = document.querySelector<HTMLDivElement>("#engine-list")!;
-  el.innerHTML = tools.map(t =>
-    '<span class="engine ' + (t.available ? "ready" : "missing") + '"><i></i><span>' + safe(t.name) +
-    '</span><small>' + (t.available ? safe(t.version || "Ready") : "Not installed") + '</small></span>'
-  ).join("");
-  const ready = tools.some(t => t.name === "Native HTTP" && t.available);
-  document.querySelector("#engine-state")!.textContent = ready ? "Engine ready" : "Checking engine";
-  document.querySelector("#engine-dot")!.className = ready ? "online" : "offline";
-}
 function mediaSourceLabel(raw: string): string {
   try {
     const host = new URL(raw).hostname.toLowerCase().replace(/^www\./, "").replace(/^m\./, "");
@@ -137,15 +121,9 @@ function isApplicationOrDocumentDownload(download: Download): boolean {
 function renderDownloads() {
   const list = document.querySelector<HTMLDivElement>("#download-list")!;
   const active = downloads.filter(d => !finalStatus(d.status));
-  const running = active.filter(d => d.status !== "Queued");
-  const queued = active.length - running.length;
   const completed = downloads.filter(d => d.status === "Completed");
-  const failed = downloads.filter(d => d.status === "Failed" || d.status === "Cancelled" || d.status === "Paused");
+  const failed = downloads.filter(d => d.status === "Failed");
   document.querySelector("#active-count")!.textContent = String(active.length);
-  document.querySelector("#sidebar-active")!.textContent = running.length + " running";
-  document.querySelector("#sidebar-queued")!.textContent = queued + " waiting · max 2 parallel jobs";
-  document.querySelector("#stat-active")!.textContent = String(running.length);
-  document.querySelector("#stat-completed")!.textContent = String(completed.length);
   document.querySelector("#queue-count")!.textContent = String(downloads.length);
   document.querySelector("#count-all")!.textContent = String(downloads.length);
   document.querySelector("#count-active")!.textContent = String(active.length);
@@ -154,9 +132,12 @@ function renderDownloads() {
 
   const query = document.querySelector<HTMLInputElement>("#download-search")!.value.trim().toLowerCase();
   const visible = downloads.filter(d => {
+    const representedIdentity = mediaDownloadIds.get(d.id);
+    if (mediaAnalysis && representedIdentity && mediaAnalysis.entries.some(entry => mediaIdentityKey(entry.url) === representedIdentity)) return false;
+    if (mediaAnalysis && mediaAnalysis.entries.some(entry => mediaIdentityKey(entry.url) === mediaIdentityKey(d.url))) return false;
     if (filter === "active" && finalStatus(d.status)) return false;
     if (filter === "completed" && d.status !== "Completed") return false;
-    if (filter === "failed" && d.status !== "Failed" && d.status !== "Cancelled" && d.status !== "Paused") return false;
+    if (filter === "failed" && d.status !== "Failed") return false;
     const searchable = (d.file_name + " " + d.url + " " + d.destination + " " + d.status).toLowerCase();
     return !query || searchable.includes(query);
   });
@@ -164,14 +145,13 @@ function renderDownloads() {
   visible.sort((a, b) => rank(a) - rank(b));
 
   if (!visible.length) {
-    const emptyTitle = downloads.length ? "Nothing in this view" : "Your queue is ready";
-    const emptyText = downloads.length ? "Try another filter or search term." : "Paste one or more links above to start downloading.";
-    list.innerHTML = '<div class="empty"><div>' + icons.download + '</div><b>' + emptyTitle + '</b><p>' + emptyText + '</p></div>';
+    // Keep the queue clean when there are no items (or the current filter has no matches).
+    list.innerHTML = "";
     return;
   }
 
   list.innerHTML = visible.map(d => {
-    const pct = Math.max(0, Math.min(100, d.progress || 0));
+    const pct = Math.max(0, Math.min(100, Number.isFinite(d.progress) ? d.progress : 0));
     const done = d.status === "Completed";
     const failedItem = d.status === "Failed";
     const cancelled = d.status === "Cancelled";
@@ -179,95 +159,95 @@ function renderDownloads() {
     const queued = d.status === "Queued";
     const isMediaItem = !!mediaSourceLabel(d.url) && !isApplicationOrDocumentDownload(d);
     const mediaTitle = isMediaItem ? (d.media_title?.trim() || "") : "";
-    const mediaVisual = mediaTitle
-      ? '<div class="download-media-thumb">' + (mediaImage(d.media_thumbnail) || '<span class="download-media-placeholder">▶</span>') + '<span class="download-media-play">▶</span></div>'
-      : '<div class="file-icon">' + (done ? icons.check : icons.file) + '</div>';
     const displayName = mediaTitle || d.file_name || d.url;
-    const mediaHeading = '<div class="download-heading"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
-      (mediaTitle ? '<span class="media-type-tag">VIDEO</span>' : '') + '</div>';
-    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
-      paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
-    const statusLabel = d.status === "Downloading" && mediaTitle ? "Downloading video" :
-      d.status === "Extracting media" ? (d.media_activity || "Fetching video info") :
-      d.status === "Retrying" ? "Auto retrying" :
-      d.status === "Connecting" ? "Connecting" :
-      d.status === "Cancelling" ? "Cancelling" :
-      d.status === "Pausing" ? "Pausing" : d.status;
-    const sizeDetail = d.total_bytes
-      ? bytes(d.downloaded_bytes) + " of " + bytes(d.total_bytes)
-      : bytes(d.downloaded_bytes) + " downloaded";
-    const measuredSpeed = liveSpeeds.get(d.id) || d.speed_bytes_sec;
-    const etaText = d.total_bytes && measuredSpeed > 0
-      ? formatTime((d.total_bytes - d.downloaded_bytes) / measuredSpeed)
-      : "";
-    const speed = measuredSpeed > 0 ? bytes(measuredSpeed) + "/s" :
-      d.status === "Retrying" ? "Retrying…" :
-      queued ? "Waiting" :
-      d.status === "Connecting" ? "Connecting…" :
-      d.status === "Extracting media" ? (d.media_activity || "Fetching details…") :
-      d.status === "Downloading" ? "Receiving…" :
-      done ? "Complete" : paused ? "Paused" : "—";
-    const detail = failedItem ? safe(d.error || "Download failed · press Retry to try again") :
-      paused ? "Paused · " + sizeDetail + " saved. Resume when you're ready." :
-      cancelled ? "This transfer was cancelled." :
-      done ? "Download completed successfully." :
-      queued ? "Added to queue · waiting for a download slot." :
-      d.status === "Retrying" ? safe(d.error || "Connection interrupted · retrying automatically.") :
-      d.status === "Connecting" ? "Connecting securely to the source…" :
-      d.status === "Extracting media" ? (d.media_activity || "Contacting the video source and fetching its file information…") :
-      d.downloaded_bytes > 0 ? "Receiving " + sizeDetail + " · estimating remaining time…" : "Preparing your transfer…";
     let sourceHost = "";
     try { sourceHost = new URL(d.url).hostname.replace(/^www\./, ""); } catch { sourceHost = ""; }
-    const sourceLabel = mediaTitle ? (mediaSourceLabel(d.url) || "MEDIA VIDEO") : sourceHost || "DIRECT DOWNLOAD";
-    const receivedLabel = d.total_bytes
+    const sourceLabel = isMediaItem
+      ? (mediaSourceLabel(d.url) || sourceHost || "MEDIA")
+      : sourceHost || "FILE";
+    const statusClass = done ? "done" : failedItem ? "failed" : cancelled ? "cancelled" :
+      paused ? "paused" : queued ? "queued" : d.status === "Retrying" ? "retrying" : "running";
+    const statusLabel = d.status === "Extracting media"
+      ? (d.media_activity || "Preparing")
+      : d.status === "Retrying" ? "Retrying"
+      : d.status === "Connecting" ? "Connecting"
+      : d.status === "Cancelling" ? "Cancelling"
+      : d.status === "Pausing" ? "Pausing"
+      : d.status === "Downloading" ? "Downloading"
+      : d.status;
+    const measuredSpeed = Math.max(0, d.speed_bytes_sec || liveSpeeds.get(d.id) || 0);
+    const activeNow = !finalStatus(d.status);
+    const speedLabel = measuredSpeed > 0
+      ? bytes(measuredSpeed) + "/s"
+      : queued ? "Waiting"
+      : paused ? "Paused"
+      : done ? "Complete"
+      : failedItem || cancelled ? "—"
+      : d.status === "Extracting media" ? "Preparing"
+      : "Calculating…";
+    const etaSeconds = d.total_bytes && measuredSpeed > 0
+      ? Math.max(0, (d.total_bytes - d.downloaded_bytes) / measuredSpeed)
+      : null;
+    const etaLabel = done ? "Complete"
+      : paused ? "Paused"
+      : queued ? "—"
+      : etaSeconds !== null && Number.isFinite(etaSeconds) ? formatTime(etaSeconds)
+      : activeNow ? "Calculating…" : "—";
+    const sizeLabel = d.total_bytes
       ? bytes(d.downloaded_bytes) + " / " + bytes(d.total_bytes)
-      : bytes(d.downloaded_bytes) + " received";
-    const etaLabel = !done && !paused && !finalStatus(d.status)
-      ? (etaText ? etaText + " left" : d.status === "Downloading" ? "Calculating…" : "")
-      : "";
-    const unknownLength = !d.total_bytes && pct <= 0 && !done;
-    const progressClass = d.status === "Connecting" || d.status === "Extracting media" ||
-      d.status === "Retrying" || (d.status === "Downloading" && d.downloaded_bytes === 0) || unknownLength ? "indeterminate" : "";
-    const progressLabel = d.total_bytes || pct > 0 ? pct.toFixed(1) + "%" :
-      d.status === "Extracting media" ? "FETCHING" : d.status === "Downloading" ? "LIVE" : done ? "100%" : "—";
-    const bar = done ? 100 : pct;
-    const isPublicMobileFile = done && !!d.file_path && d.file_path.startsWith("content://");
-    const output = done && d.file_path
-      ? isPublicMobileFile
-        ? '<div class="output-path"><span>' + icons.folder + '</span><span>Saved to your phone’s Downloads folder</span></div>'
-        : desktopFileActions
-          ? '<div class="output-path"><span>' + icons.folder + '</span><span title="' + safe(d.file_path) + '">' + safe(d.file_path) + '</span></div>'
-          : '<div class="output-path"><span>' + icons.folder + '</span><span>Saved in app storage</span></div>'
-      : "";
+      : bytes(d.downloaded_bytes) + " downloaded";
+    const progressKnown = d.total_bytes !== null || pct > 0 || done;
+    const progressLabel = done ? "100%" : progressKnown ? pct.toFixed(1) + "%" : statusLabel;
+    const indeterminate = !done &&
+      ["Connecting", "Extracting media", "Retrying", "Downloading"].includes(d.status) &&
+      !progressKnown;
+    const barWidth = done ? 100 : progressKnown ? pct : 0;
+    const isMobileSavedFile = done && !!d.file_path &&
+      (d.file_path.startsWith("content://") || d.destination === "App downloads");
+    const thumbnail = isMediaItem
+      ? (mediaImage(d.media_thumbnail) || '<span class="transfer-media-placeholder">▶</span>')
+      : '<span class="transfer-file-icon">' + (done ? icons.check : icons.file) + '</span>';
     const action = !finalStatus(d.status)
       ? d.status === "Cancelling" || d.status === "Pausing"
         ? '<span class="stopping-label">' + (d.status === "Cancelling" ? "Cancelling…" : "Pausing…") + '</span>'
-        : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause and keep downloaded data">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel and delete incomplete files">Cancel</button></div>'
-      : isPublicMobileFile
+        : '<div class="download-actions"><button class="pause-button" data-pause="' + safe(d.id) + '" title="Pause">Pause</button><button class="cancel-button" data-cancel="' + safe(d.id) + '" title="Cancel">Cancel</button></div>'
+      : isMobileSavedFile
         ? '<button class="open-button" data-open="' + safe(d.id) + '">' + icons.external + '<span>Open file</span></button>'
         : done && d.file_path && desktopFileActions
           ? '<button class="reveal-button" data-reveal="' + safe(d.id) + '">' + icons.external + '<span>Show in folder</span></button>'
           : paused
-            ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Continue from saved progress">' + icons.refresh + '<span>Resume</span></button>'
+            ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Resume">' + icons.refresh + '<span>Resume</span></button>'
             : failedItem
-              ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry this failed download">' + icons.refresh + '<span>Retry</span></button>'
+              ? '<button class="resume-button" data-resume="' + safe(d.id) + '" title="Retry">' + icons.refresh + '<span>Retry</span></button>'
               : '<span class="finish-mark ' + statusClass + '">' + icons.check + '</span>';
-    const transferMeta = '<div class="download-meta">' +
-      '<span class="download-meta-item"><small>RECEIVED</small><b>' + safe(receivedLabel) + '</b></span>' +
-      '<span class="download-meta-item speed-meta"><small>' + (done ? "RESULT" : "SPEED") + '</small><b>' + safe(done ? "Saved" : speed) + '</b></span>' +
-      (etaLabel ? '<span class="download-meta-item eta-meta"><small>TIME LEFT</small><b>' + safe(etaLabel) + '</b></span>' : '') +
-      '</div>';
-    return '<article class="download ' + statusClass + (mediaTitle ? ' media-download' : '') + '">' +
-      '<div class="download-card-visual">' + mediaVisual + '</div>' +
-      '<div class="download-body">' +
-        '<div class="download-card-heading"><div class="download-card-title">' + mediaHeading +
-          '<span class="download-source-label">' + safe(sourceLabel) + '</span></div>' +
-          '<span class="status ' + statusClass + '"><i></i>' + safe(statusLabel) + '</span></div>' +
-        '<p class="download-card-message">' + detail + '</p>' +
-        '<div class="download-progress-row"><div class="track ' + progressClass + '"><i style="width:' + bar.toFixed(1) + '%"></i></div><b class="progress-label">' + progressLabel + '</b></div>' +
-        transferMeta + output +
+    const output = done && d.file_path
+      ? '<div class="transfer-output" title="' + safe(d.file_path) + '">' + icons.folder +
+        '<span>' + safe(isMobileSavedFile ? (d.file_path.startsWith("content://") ? "Saved to Downloads" : "Saved in app Downloads") : desktopFileActions ? d.file_path : "Saved") + '</span></div>'
+      : "";
+    const detail = failedItem ? '<div class="transfer-error">' + safe(d.error || "Download failed") + '</div>' : "";
+    return '<article class="transfer-card ' + statusClass + (isMediaItem ? ' transfer-media' : '') + '">' +
+      '<div class="transfer-card-head">' +
+        '<div class="transfer-identity">' +
+          '<div class="transfer-thumb ' + (isMediaItem ? 'is-media' : 'is-file') + '">' + thumbnail + '</div>' +
+          '<div class="transfer-info">' +
+            '<div class="transfer-title-row"><b title="' + safe(displayName) + '">' + safe(displayName) + '</b>' +
+              '<span class="transfer-source">' + safe(sourceLabel) + '</span></div>' +
+            '<span class="transfer-url" title="' + safe(d.url) + '">' + safe(sourceHost || d.url) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<span class="transfer-status ' + statusClass + '"><i></i>' + safe(statusLabel) + '</span>' +
       '</div>' +
-      '<div class="download-card-action">' + action + '</div>' +
+      detail +
+      '<div class="transfer-progress-block">' +
+        '<div class="transfer-progress-top"><span>PROGRESS</span><b>' + safe(progressLabel) + '</b></div>' +
+        '<div class="transfer-progress-track' + (indeterminate ? ' is-indeterminate' : '') + '"><i style="width:' + barWidth.toFixed(1) + '%"></i></div>' +
+      '</div>' +
+      '<div class="transfer-metrics">' +
+        '<div class="transfer-metric transfer-speed"><span>SPEED</span><b>' + safe(speedLabel) + '</b></div>' +
+        '<div class="transfer-metric"><span>DOWNLOADED</span><b>' + safe(sizeLabel) + '</b></div>' +
+        '<div class="transfer-metric"><span>ETA</span><b>' + safe(etaLabel) + '</b></div>' +
+      '</div>' +
+      '<div class="transfer-card-foot">' + output + '<div class="transfer-actions">' + action + '</div></div>' +
       '</article>';
   }).join("");
 }
@@ -283,16 +263,22 @@ function updateLiveSpeedSamples(next: Download[]) {
     }
     activeIds.add(item.id);
     const previous = liveSamples.get(item.id);
+    let lastMovingAt = previous?.lastMovingAt ?? now;
     if (previous && now > previous.at && item.downloaded_bytes >= previous.bytes) {
-      const instant = (item.downloaded_bytes - previous.bytes) * 1000 / (now - previous.at);
+      const elapsed = now - previous.at;
+      const instant = (item.downloaded_bytes - previous.bytes) * 1000 / elapsed;
       if (instant > 0) {
         const old = liveSpeeds.get(item.id) || instant;
         liveSpeeds.set(item.id, Math.round(old * 0.35 + instant * 0.65));
+        lastMovingAt = now;
+      } else if (now - lastMovingAt > 1800) {
+        liveSpeeds.set(item.id, 0);
       }
     } else {
       liveSpeeds.delete(item.id);
+      lastMovingAt = now;
     }
-    liveSamples.set(item.id, { bytes: item.downloaded_bytes, at: now });
+    liveSamples.set(item.id, { bytes: item.downloaded_bytes, at: now, lastMovingAt });
   }
   for (const id of [...liveSamples.keys()]) {
     if (!activeIds.has(id) && !next.some(item => item.id === id && ["Connecting", "Queued"].includes(item.status))) {
@@ -305,19 +291,15 @@ function updateLiveSpeedSamples(next: Download[]) {
 async function refreshDownloads() {
   try {
     const next = await invoke<Download[]>("get_downloads");
+    for (const id of [...mediaDownloadIds.keys()]) {
+      if (!next.some(item => item.id === id)) mediaDownloadIds.delete(id);
+    }
     updateLiveSpeedSamples(next);
     downloads = next;
     renderDownloads();
-  } catch (error) {
-    document.querySelector("#engine-state")!.textContent = "Connection issue";
-    document.querySelector("#engine-dot")!.className = "offline";
-  }
-}
-async function refreshTools() {
-  try {
-    renderTools(await invoke<Tool[]>("check_engines"));
+    if (mediaAnalysis) updateMediaSelection();
   } catch {
-    document.querySelector("#engine-list")!.textContent = "Engine status unavailable";
+    // The queue will refresh again automatically while the app is open.
   }
 }
 function scheduleRefresh(delay?: number) {
@@ -400,7 +382,7 @@ applyPreferences();
 function updateUrlCount() {
   const content = document.querySelector<HTMLTextAreaElement>("#urls")!.value;
   const count = content.split(/\r?\n/).map(line => line.trim()).filter(Boolean).length;
-  document.querySelector("#url-count")!.textContent = count + (count === 1 ? " link detected" : " links detected");
+  document.querySelector("#url-count")!.textContent = String(count);
 }
 
 function normalizedLink(raw: string): string {
@@ -410,6 +392,50 @@ function normalizedLink(raw: string): string {
     return parsed.href;
   } catch {
     return raw.trim();
+  }
+}
+function mediaIdentityKey(raw: string): string {
+  try {
+    const parsed = new URL(raw.trim());
+    const host = parsed.hostname.toLowerCase().replace(/^(www\.|m\.)/, "");
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    if (host === "youtu.be" && segments[0]) return "youtube:" + segments[0];
+    if (host === "youtube.com" || host.endsWith(".youtube.com") || host === "youtube-nocookie.com") {
+      const videoId = parsed.searchParams.get("v");
+      if (videoId) return "youtube:" + videoId;
+      const marker = segments.findIndex(part => ["shorts", "live", "embed", "v"].includes(part));
+      if (marker >= 0 && segments[marker + 1]) return "youtube:" + segments[marker + 1];
+    }
+    if (host === "fb.watch" || host.endsWith(".fb.watch") || host === "facebook.watch") {
+      if (segments[0]) return "facebook:" + segments[0];
+    }
+    if (host === "facebook.com" || host.endsWith(".facebook.com") || host === "fb.com" || host.endsWith(".fb.com")) {
+      const videoId = parsed.searchParams.get("v");
+      if (videoId) return "facebook:" + videoId;
+      const storyId = parsed.searchParams.get("story_fbid");
+      if (storyId) return "facebook-story:" + (parsed.searchParams.get("id") || "") + ":" + storyId;
+      const marker = segments.findIndex(part => ["reel", "reels", "video", "v"].includes(part));
+      if (marker >= 0 && segments[marker + 1]) return "facebook:" + segments[marker + 1];
+    }
+    return normalizedLink(raw);
+  } catch {
+    return raw.trim();
+  }
+}
+function findExistingMediaDownload(entry: MediaEntry): Download | undefined {
+  const identity = mediaIdentityKey(entry.url);
+  return downloads.find(item => item.status !== "Cancelled" && mediaIdentityKey(item.url) === identity);
+}
+function existingMediaStatus(download: Download): string {
+  switch (download.status) {
+    case "Completed": return "Downloaded";
+    case "Paused": return "Paused";
+    case "Failed": return "Failed";
+    case "Queued": return "Queued";
+    case "Retrying": return "Retrying";
+    case "Pausing": return "Pausing";
+    case "Cancelling": return "Cancelling";
+    default: return "In progress";
   }
 }
 function isDirectFileUrl(raw: string): boolean {
@@ -430,9 +456,11 @@ function isMediaStreamUrl(raw: string): boolean {
 }
 function updateAutoStatus(message: string, state = "") {
   const status = document.querySelector<HTMLElement>("#auto-status");
-  if (!status) return;
+  const wrap = document.querySelector<HTMLElement>("#auto-status-wrap");
+  if (!status || !wrap) return;
   status.textContent = message;
   status.dataset.state = state;
+  wrap.hidden = !message;
 }
 async function startDirectDownload(url: string): Promise<void> {
   const destination = document.querySelector<HTMLInputElement>("#destination")!.value.trim();
@@ -494,20 +522,18 @@ async function autoProcessPastedLinks() {
   mediaFormats = [];
   if (mediaAnalyzing) {
     mediaSection.hidden = false;
-    mediaError.hidden = false;
-    mediaError.textContent = "Checking media details and available videos…";
+    mediaError.hidden = true;
+    mediaError.textContent = "";
     document.querySelector<HTMLDivElement>("#media-entry-list")!.innerHTML = "";
-    document.querySelector<HTMLElement>("#media-title")!.textContent = "Analyzing media…";
-    document.querySelector<HTMLElement>("#media-subtitle")!.textContent = "Fetching source information and available formats";
+    document.querySelector<HTMLElement>("#media-title")!.textContent = "Analyzing…";
     document.querySelector<HTMLDivElement>("#media-preview-thumb")!.innerHTML = "<span>▶</span>";
     document.querySelector<HTMLButtonElement>("#download-selected-media")!.disabled = true;
     document.querySelector<HTMLElement>("#media-entry-count")!.textContent = "Analyzing…";
-    document.querySelector<HTMLElement>("#media-selection-summary")!.textContent = "Please wait…";
-    updateAutoStatus("Recognizing media link…", "working");
+    document.querySelector<HTMLElement>("#media-selection-summary")!.textContent = "";
   } else {
     mediaSection.hidden = true;
     mediaError.hidden = true;
-    updateAutoStatus("Checking link type…", "working");
+    updateAutoStatus("Checking…", "working");
   }
   try {
     for (const url of candidates) {
@@ -516,7 +542,7 @@ async function autoProcessPastedLinks() {
       const shouldInspect = !!mediaSourceLabel(url) || isMediaStreamUrl(url) || !isDirectFileUrl(url);
       if (shouldInspect) {
         try {
-          updateAutoStatus("Analyzing " + new URL(url).hostname + "…", "working");
+          if (!mediaAnalyzing) updateAutoStatus("Analyzing…", "working");
           const result = await invoke<MediaAnalysis>("analyze_media", { url });
           if (!result.entries.length) throw new Error("No downloadable media items were found.");
           analyses.push(result);
@@ -537,7 +563,7 @@ async function autoProcessPastedLinks() {
         }
       }
       try {
-        updateAutoStatus("Direct file detected · adding download…", "working");
+        updateAutoStatus("Adding…", "working");
         await startDirectDownload(url);
         queued += 1;
         succeeded.add(key);
@@ -567,7 +593,6 @@ async function autoProcessPastedLinks() {
       };
       mediaFormats = [...new Map<string, MediaFormat>(formats.map(format => [format.formatId + "|" + format.resolution, format] as const)).values()];
       renderMediaLibrary();
-      renderMediaResolutionOptions(mediaFormats);
       if (mediaErrors.length) {
         const error = document.querySelector<HTMLElement>("#media-error")!;
         error.hidden = false;
@@ -579,7 +604,18 @@ async function autoProcessPastedLinks() {
       if (mediaErrors.length) {
         section.hidden = false;
         error.hidden = false;
-        error.textContent = mediaErrors.join(" · ");
+        const rawError = mediaErrors.join(" · ");
+        const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
+        const details = rawError
+          .replace(/^[^:]{1,100}:\s*/, "")
+          .replace(/^(?:Error|Exception):\s*/i, "")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 420);
+        document.querySelector<HTMLElement>("#media-title")!.textContent = "Unavailable";
+        error.textContent = denied
+          ? `HTTP 403 · Source refused the request. ${details}`
+          : `Analysis failed · ${details || "Android did not return an error detail."}`;
       } else {
         section.hidden = true;
         error.hidden = true;
@@ -592,7 +628,7 @@ async function autoProcessPastedLinks() {
     if (queued) {
       await refreshDownloads();
       scheduleRefresh(120);
-      toast(queued + (queued === 1 ? " direct download started." : " direct downloads started."));
+      toast("Started " + queued + " downloads.");
     }
     if (succeeded.size && input.value === snapshot) {
       input.value = snapshot.split(/\r?\n/)
@@ -601,16 +637,17 @@ async function autoProcessPastedLinks() {
       updateUrlCount();
     }
     if (analyses.length) {
-      updateAutoStatus(analyses.length + " media source(s) ready · choose items and press Download.", "success");
-      toast(mediaAnalysis!.entries.length + " media item(s) ready in the Media Library.");
+      updateAutoStatus("", "");
+      toast(mediaAnalysis!.entries.length + " ready.");
     } else if (mediaErrors.length) {
-      updateAutoStatus("Could not process the link · check the message above and try again.", "error");
-      toast(mediaErrors[0], true);
+      const hasMediaLink = candidates.some(url => !!mediaSourceLabel(url) || isMediaStreamUrl(url));
+      if (!hasMediaLink) toast(mediaErrors[0], true);
+      updateAutoStatus("", "");
     } else if (queued) {
-      updateAutoStatus("Download started · live progress is shown in Transfer Activity.", "success");
+      updateAutoStatus("", "");
     }
   } catch (problem) {
-    updateAutoStatus("Link processing failed · " + String(problem), "error");
+    updateAutoStatus("", "");
     toast(String(problem), true);
   } finally {
     mediaAnalyzing = false;
@@ -636,8 +673,7 @@ urlInput.addEventListener("paste", event => {
   window.setTimeout(() => scheduleAutoProcess(90), 35);
 });
 
-function mediaDuration(seconds: number | null): string {
-  if (seconds === null || !Number.isFinite(seconds)) return "Duration unavailable";
+function mediaDuration(seconds: number): string {
   return formatTime(seconds);
 }
 function mediaImage(url: string | null): string {
@@ -650,34 +686,68 @@ function mediaImage(url: string | null): string {
 }
 function selectedMediaIndices(): number[] {
   return Array.from(document.querySelectorAll<HTMLInputElement>("[data-media-index]:checked"))
+    .filter(input => !input.disabled)
     .map(input => Number(input.dataset.mediaIndex))
     .filter(index => Number.isInteger(index) && index >= 0 && !!mediaAnalysis?.entries[index]);
 }
+function mediaFormatOptions(): string {
+  return '<option value="">Auto</option>' + Array.from(new Set(mediaFormats
+    .filter(format => format.isVideo)
+    .map(format => {
+      if (format.height && format.height > 0) return format.height;
+      const byDimensions = format.resolution.match(/x(\\d{3,5})$/i);
+      const byLabel = format.resolution.match(/(\\d{3,5})p/i);
+      return Number((byDimensions || byLabel)?.[1] || 0);
+    })
+    .filter(height => Number.isFinite(height) && height >= 144)))
+    .sort((a,b)=>b-a)
+    .map(height => '<option value="max-height-' + height + '">' + height + 'p</option>').join("");
+}
 function updateMediaSelection() {
+  document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => {
+    const index = Number(input.dataset.mediaIndex);
+    const entry = Number.isInteger(index) ? mediaAnalysis?.entries[index] : undefined;
+    const existing = entry ? findExistingMediaDownload(entry) : undefined;
+    input.disabled = !!existing;
+    if (existing) input.checked = false;
+    const row = input.closest<HTMLElement>(".media-entry");
+    if (row) {
+      row.classList.toggle("already-downloaded", !!existing);
+      row.classList.toggle("is-downloading", !!existing && !finalStatus(existing.status));
+    }
+    const state = row?.querySelector<HTMLElement>(".media-entry-state");
+    const progress = row?.querySelector<HTMLElement>(".media-entry-progress");
+    const status = existing ? (existing.status === "Downloading" ? "Downloading" :
+      existing.status === "Extracting media" ? (existing.media_activity || "Preparing") :
+      existing.status === "Completed" ? "Complete" : existing.status) : "";
+    if (state) state.textContent = status || "";
+    if (progress) {
+      const active = !!existing && !finalStatus(existing.status);
+      const pct = existing ? Math.max(0, Math.min(100, existing.progress || 0)) : 0;
+      const speed = existing ? Math.max(0, existing.speed_bytes_sec || liveSpeeds.get(existing.id) || 0) : 0;
+      const eta = existing?.total_bytes && speed > 0 ? formatTime((existing.total_bytes-existing.downloaded_bytes)/speed) : "—";
+      const actions = existing && !finalStatus(existing.status)
+        ? '<div class="media-inline-actions"><button data-pause="' + safe(existing.id) + '">Pause</button><button data-cancel="' + safe(existing.id) + '">Cancel</button></div>'
+        : existing && (existing.status === "Paused" || existing.status === "Failed")
+          ? '<div class="media-inline-actions"><button data-resume="' + safe(existing.id) + '">' + (existing.status === "Paused" ? "Resume" : "Retry") + '</button></div>'
+          : "";
+      progress.innerHTML = existing
+        ? '<div class="media-inline-progress"><div class="media-inline-track"><i style="width:' + pct.toFixed(1) + '%"></i></div><div class="media-inline-metrics"><b>' + safe(existing.status === "Completed" ? "100%" : pct.toFixed(1) + "%") + '</b><span>' + safe(speed > 0 ? bytes(speed) + "/s" : active ? (existing.downloaded_bytes > 0 ? "Updating…" : "Preparing…") : existing.status) + '</span><span>' + safe(existing.total_bytes ? bytes(existing.downloaded_bytes) + " / " + bytes(existing.total_bytes) : bytes(existing.downloaded_bytes) + " downloaded") + '</span><span>ETA ' + safe(eta) + '</span>' + actions + '</div></div>'
+        : "";
+    }
+    const controls = row?.querySelector<HTMLElement>(".media-entry-options");
+    if (controls) controls.hidden = !!existing;
+  });
   const count = selectedMediaIndices().length;
   const total = mediaAnalysis?.entries.length || 0;
   const label = document.querySelector<HTMLElement>("#media-selection-summary");
   const counter = document.querySelector<HTMLElement>("#media-entry-count");
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media");
-  const quality = document.querySelector<HTMLSelectElement>("#media-quality-select");
-  const resolution = document.querySelector<HTMLSelectElement>("#media-resolution-select");
-  const chosenMode = quality?.value === "audio" ? "Audio only" : "Default · best video + audio";
-  if (label) label.textContent = count + " of " + total + " selected · " + chosenMode;
-  if (counter) counter.textContent = total + " media item" + (total === 1 ? "" : "s") + " found";
-  const summary = document.querySelector<HTMLElement>("#media-format-summary");
-  if (summary) summary.textContent = quality?.value === "audio"
-    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded."
-    : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
-  if (resolution) resolution.disabled = mediaAnalyzing || quality?.value === "audio" || resolution.options.length <= 1;
-  const resolutionSummary = document.querySelector<HTMLElement>("#media-resolution-summary");
-  if (resolutionSummary) {
-    if (quality?.value === "audio") resolutionSummary.textContent = "Resolution is not used for audio-only downloads.";
-    else if (resolution?.value) resolutionSummary.textContent = "Maximum quality: " + (resolution.selectedOptions[0]?.textContent || "Selected resolution") + ". Lower quality may be used when the source has no matching stream.";
-    else if (mediaFormats.length) resolutionSummary.textContent = mediaFormats.length + " format(s) checked. Choose a maximum resolution or leave Auto for the best available.";
-  }
+  if (label) label.textContent = count + " selected";
+  if (counter) counter.textContent = total + " items";
   if (button) {
     button.disabled = count === 0 || mediaAnalyzing;
-    button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count + " selected";
+    button.textContent = mediaAnalyzing ? "Analyzing…" : "Download " + count;
   }
 }
 function renderMediaLibrary() {
@@ -685,100 +755,73 @@ function renderMediaLibrary() {
   const error = document.querySelector<HTMLElement>("#media-error")!;
   if (!mediaAnalysis) { section.hidden = true; return; }
   section.hidden = false;
-  const title = document.querySelector<HTMLElement>("#media-title")!;
-  const subtitle = document.querySelector<HTMLElement>("#media-subtitle")!;
-  title.textContent = mediaAnalysis.title;
+  document.querySelector<HTMLElement>("#media-title")!.textContent = mediaAnalysis.title;
   const preview = document.querySelector<HTMLDivElement>("#media-preview-thumb")!;
   const previewUrl = mediaAnalysis.thumbnail || mediaAnalysis.entries[0]?.thumbnail || null;
   preview.innerHTML = mediaImage(previewUrl) || '<span class="media-thumb-placeholder">▶</span>';
-  subtitle.textContent = mediaAnalysis.extractor +
-    (mediaAnalysis.uploader ? " · " + mediaAnalysis.uploader : "") +
-    " · " + mediaAnalysis.entries.length + " item(s)" +
-    (mediaAnalysis.entryCount > mediaAnalysis.entries.length
-      ? " loaded of " + mediaAnalysis.entryCount
-      : "");
-  const quality = document.querySelector<HTMLSelectElement>("#media-quality-select")!;
-  const previous = quality.value;
-  quality.innerHTML = '<option value="">Default · best available</option><option value="audio">Audio only</option>';
-  if (previous === "audio") quality.value = previous;
-  const resolution = document.querySelector<HTMLSelectElement>("#media-resolution-select")!;
-  resolution.innerHTML = '<option value="">Auto · best available</option>';
-  resolution.value = "";
-  resolution.disabled = true;
+  document.querySelector<HTMLElement>("#media-preview-title")!.textContent = mediaAnalysis.title;
   error.hidden = true;
   error.textContent = "";
-  const summary = document.querySelector<HTMLElement>("#media-format-summary")!;
-  summary.textContent = quality.value === "audio"
-    ? "Audio only: DownBest selects the best available audio stream. No video is downloaded. Only the first item is selected initially."
-    : "Default: download the best available video with audio. Only the first item is selected initially; use Select all for a full playlist.";
   const list = document.querySelector<HTMLDivElement>("#media-entry-list")!;
+  const resolutionOptions = mediaFormatOptions();
   list.innerHTML = mediaAnalysis.entries.map((entry, index) => {
     const thumbnail = mediaImage(entry.thumbnail);
     const indexLabel = entry.playlistIndex ?? index + 1;
-    const checked = index === 0 ? " checked" : "";
-    return '<label class="media-entry"><input type="checkbox" data-media-index="' + index + '"' + checked + '><span class="media-entry-thumb">' +
-      (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
-      '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' +
-      safe(entry.title) + '</b><small>' + safe(mediaDuration(entry.duration)) + ' · ' + safe(entry.id) + '</small></span></label>';
+    const existing = findExistingMediaDownload(entry);
+    const checked = index === 0 && !existing ? " checked" : "";
+    const disabled = existing ? " disabled" : "";
+    const status = existing ? (existing.status === "Downloading" ? "Downloading" :
+      existing.status === "Extracting media" ? (existing.media_activity || "Preparing") :
+      existing.status === "Completed" ? "Complete" : existing.status) : "Select";
+    const progress = existing ? '<div class="media-entry-progress"></div>' : '<div class="media-entry-progress"></div>';
+    return '<article class="media-entry' + (existing ? ' already-downloaded' : '') + '">' +
+      '<div class="media-entry-main"><label class="media-entry-pick"><input type="checkbox" data-media-index="' + index + '"' + checked + disabled + '><span class="media-select-mark">✓</span></label>' +
+      '<span class="media-entry-thumb">' + (thumbnail || '<span class="media-thumb-placeholder">' + icons.file + '</span>') +
+      '<i>' + indexLabel + '</i></span><span class="media-entry-text"><b title="' + safe(entry.title) + '">' + safe(entry.title) + '</b>' +
+      (entry.duration !== null && Number.isFinite(entry.duration) ? '<small>' + safe(mediaDuration(entry.duration)) + '</small>' : '') +
+      '<small class="media-entry-state">' + safe(status) + '</small></span></div>' +
+      '<div class="media-entry-options"' + (existing ? ' hidden' : '') + '>' +
+      '<label>TYPE<select data-media-kind="' + index + '"><option value="auto">Video + audio</option><option value="audio">Audio</option><option value="video-only">Video only</option></select></label>' +
+      '<label>QUALITY<select data-media-format="' + index + '">' + resolutionOptions + '</select></label></div>' +
+      progress + '</article>';
   }).join("");
   updateMediaSelection();
-}
-function renderMediaResolutionOptions(formats: MediaFormat[]) {
-  const select = document.querySelector<HTMLSelectElement>("#media-resolution-select")!;
-  const heights = Array.from(new Set(formats
-    .filter(format => format.isVideo)
-    .map(format => {
-      if (format.height && format.height > 0) return format.height;
-      const byDimensions = format.resolution.match(/x(\d{3,5})$/i);
-      const byLabel = format.resolution.match(/(\d{3,5})p/i);
-      return Number((byDimensions || byLabel)?.[1] || 0);
-    })
-    .filter(height => Number.isFinite(height) && height >= 144)))
-    .sort((a, b) => b - a);
-  select.innerHTML = '<option value="">Auto · best available</option>' +
-    heights.map(height => '<option value="max-height-' + height + '">Up to ' + height + 'p</option>').join("");
-  select.disabled = heights.length === 0 || mediaAnalyzing;
-  const summary = document.querySelector<HTMLElement>("#media-resolution-summary");
-  if (summary) summary.textContent = heights.length
-    ? heights.length + " resolution level(s) found. Choose a maximum resolution; Auto selects the best available."
-    : "No selectable video resolution was returned. Auto mode will still try the best available stream.";
 }
 
 async function downloadSelectedMedia() {
   if (!mediaAnalysis) return;
   const indices = selectedMediaIndices();
-  if (!indices.length) { toast("Select at least one video first.", true); return; }
+  if (!indices.length) { toast("Select items first.", true); return; }
   const button = document.querySelector<HTMLButtonElement>("#download-selected-media")!;
-  const audioOnly = document.querySelector<HTMLSelectElement>("#media-quality-select")!.value === "audio";
-  const formatSelector = audioOnly ? "audio" : (document.querySelector<HTMLSelectElement>("#media-resolution-select")!.value || null);
   const destination = document.querySelector<HTMLInputElement>("#destination")!.value.trim();
   const concurrency = Number(document.querySelector<HTMLSelectElement>("#concurrency")!.value);
   button.disabled = true;
-  let added = 0;
-  let failed = 0;
+  let added = 0, failed = 0;
   try {
     for (let offset = 0; offset < indices.length; offset += 8) {
       const batch = indices.slice(offset, offset + 8);
       const results = await Promise.allSettled(batch.map(index => {
         const entry = mediaAnalysis!.entries[index];
-        return invoke("start_download", {
-          url: entry.url,
-          kind: audioOnly ? "audio" : "auto",
-          destination: destination || null,
-          concurrency,
-          cookies: null,
-          formatSelector,
-          mediaTitle: entry.title,
-          mediaThumbnail: entry.thumbnail
+        const kind = document.querySelector<HTMLSelectElement>('[data-media-kind="' + index + '"]')?.value || "auto";
+        const formatSelector = kind === "audio" ? "audio" :
+          (document.querySelector<HTMLSelectElement>('[data-media-format="' + index + '"]')?.value || null);
+        return invoke<Download>("start_download", {
+          url: entry.url, kind, destination: destination || null, concurrency,
+          cookies: null, formatSelector, mediaTitle: entry.title, mediaThumbnail: entry.thumbnail
         });
       }));
+      results.forEach((result, resultIndex) => {
+        if (result.status === "fulfilled") {
+          const entry = mediaAnalysis?.entries[batch[resultIndex]];
+          if (entry) mediaDownloadIds.set(result.value.id, mediaIdentityKey(entry.url));
+        }
+      });
       added += results.filter(result => result.status === "fulfilled").length;
       failed += results.length - results.filter(result => result.status === "fulfilled").length;
       await refreshDownloads();
-      button.textContent = "Queued " + added + " / " + indices.length;
+      button.textContent = "Starting " + added + " / " + indices.length;
     }
-    toast(added + " video(s) added to the download queue" +
-      (failed ? " · " + failed + " could not be queued" : "") + ".");
+    toast(added + " started" + (failed ? " · " + failed + " failed" : "") + ".");
     scheduleRefresh(100);
   } catch (problem) {
     toast(String(problem), true);
@@ -790,10 +833,8 @@ document.querySelector("#close-media-library")!.addEventListener("click", () => 
   document.querySelector<HTMLElement>("#media-library")!.hidden = true;
 });
 document.querySelector("#media-entry-list")!.addEventListener("change", updateMediaSelection);
-document.querySelector("#media-quality-select")!.addEventListener("change", updateMediaSelection);
-document.querySelector("#media-resolution-select")!.addEventListener("change", updateMediaSelection);
 document.querySelector("#select-all-media")!.addEventListener("click", () => {
-  document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => { input.checked = true; });
+  document.querySelectorAll<HTMLInputElement>("[data-media-index]").forEach(input => { if (!input.disabled) input.checked = true; });
   updateMediaSelection();
 });
 document.querySelector("#clear-all-media")!.addEventListener("click", () => {
@@ -807,20 +848,20 @@ document.querySelector("#choose-folder")!.addEventListener("click", async () => 
     const selected = await openDialog({ directory: true, multiple: false, title: "Choose download folder" });
     if (typeof selected === "string") {
       document.querySelector<HTMLInputElement>("#destination")!.value = selected;
-      toast("Download folder selected.");
+      toast("Folder selected.");
     }
   } catch (error) {
     toast("Folder selection is unavailable: " + String(error), true);
   }
 });
 
-document.querySelector("#download-list")!.addEventListener("click", async event => {
+async function handleDownloadAction(event: Event) {
   const target = event.target as HTMLElement;
   const pause = target.closest<HTMLButtonElement>("[data-pause]");
   if (pause) {
     try {
       await invoke("pause_download", { id: pause.dataset.pause });
-      toast("Pausing safely · partial data will be kept.");
+      toast("Paused.");
       await refreshDownloads();
     } catch (error) { toast(String(error), true); }
     return;
@@ -830,7 +871,7 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
     cancel.disabled = true;
     try {
       await invoke("cancel_download", { id: cancel.dataset.cancel });
-      toast("Download cancelled · incomplete files will be removed.");
+      toast("Cancelled.");
       await refreshDownloads();
       scheduleRefresh(100);
     } catch (error) {
@@ -843,7 +884,7 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
   if (resume) {
     try {
       await invoke("resume_download", { id: resume.dataset.resume });
-      toast("Resuming from saved progress.");
+      toast("Resuming…");
       await refreshDownloads();
       scheduleRefresh(100);
     } catch (error) { toast(String(error), true); }
@@ -862,7 +903,9 @@ document.querySelector("#download-list")!.addEventListener("click", async event 
       await invoke("reveal_download", { id: reveal.dataset.reveal });
     } catch (error) { toast(String(error), true); }
   }
-});
+}
+document.querySelector("#download-list")!.addEventListener("click", handleDownloadAction);
+document.querySelector("#media-entry-list")!.addEventListener("click", handleDownloadAction);
 document.querySelector("#download-search")!.addEventListener("input", renderDownloads);
 document.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach(button => {
   button.addEventListener("click", () => {
@@ -874,14 +917,13 @@ document.querySelectorAll<HTMLButtonElement>("[data-filter]").forEach(button => 
 });
 document.querySelector("#refresh")!.addEventListener("click", () => {
   void refreshDownloads();
-  void refreshTools();
   scheduleRefresh(500);
 });
 document.querySelector("#clear")!.addEventListener("click", async () => {
   try {
     await invoke("clear_finished");
     await refreshDownloads();
-    toast("Completed and failed items cleared.");
+    toast("Finished items cleared.");
   } catch (error) { toast(String(error), true); }
 });
 document.addEventListener("visibilitychange", () => {
@@ -893,10 +935,9 @@ document.addEventListener("visibilitychange", () => {
 
 void Promise.all([
   refreshDownloads(),
-  refreshTools(),
   invoke<string>("default_save_location").then(location => {
-    const note = document.querySelector<HTMLElement>("#save-location-note");
-    if (note) note.textContent = location + " Pause keeps partial data. Resume only starts when you press it; Cancel deletes unfinished files.";
+    const destination = document.querySelector<HTMLInputElement>("#destination");
+    if (destination) destination.placeholder = location;
   }).catch(() => {}),
   invoke<boolean>("supports_folder_picker").then(supported => {
     desktopFileActions = supported;

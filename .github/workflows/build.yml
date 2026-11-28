@@ -1,4 +1,4 @@
-name: DownBest cross-platform builds
+name: DownBest Android + Windows EXE builds
 
 on:
   push:
@@ -15,41 +15,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  desktop:
-    name: Desktop · ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: windows-installers
-            path: |
-              src-tauri/target/release/bundle/nsis/*.exe
-              src-tauri/target/release/bundle/msi/*.msi
-          - os: macos-15
-            artifact: macos-arm64
-            path: src-tauri/target/release/bundle/dmg/*.dmg
-          - os: macos-15-intel
-            artifact: macos-x64
-            path: src-tauri/target/release/bundle/dmg/*.dmg
-          - os: ubuntu-22.04
-            artifact: linux-packages
-            path: |
-              src-tauri/target/release/bundle/appimage/*.AppImage
-              src-tauri/target/release/bundle/deb/*.deb
-              src-tauri/target/release/bundle/rpm/*.rpm
-    runs-on: ${{ matrix.os }}
+  windows-exe:
+    name: Windows EXE
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
       - name: Prepare bundled media tools (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -75,66 +49,6 @@ jobs:
           Expand-Archive $denoZip "$env:RUNNER_TEMP/deno" -Force
           Copy-Item "$env:RUNNER_TEMP/deno/deno.exe" "$tools/deno.exe"
           Get-ChildItem $tools -File | ForEach-Object { if ($_.Extension -eq ".exe") { Unblock-File $_ } }
-      - name: Prepare bundled media tools (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tools="src-tauri/tools"
-          mkdir -p "$tools/lib"
-          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux" -o "$tools/yt-dlp"
-          chmod +x "$tools/yt-dlp"
-          sudo apt-get install -y aria2 patchelf
-          cp "$(command -v aria2c)" "$tools/aria2c"
-          ldd "$tools/aria2c" | tr ' ' '\n' | grep -E '/.*[.]so' | sort -u | while read -r dep; do
-            base="$(basename "$dep")"
-            case "$base" in libc.so*|libm.so*|libpthread.so*|librt.so*|libdl.so*|ld-linux*) continue ;; esac
-            if [ -f "$dep" ]; then cp -L "$dep" "$tools/lib/$base"; fi
-          done
-          patchelf --set-rpath '$ORIGIN/lib' "$tools/aria2c"
-          ff="$RUNNER_TEMP/ffmpeg-linux.tar.xz"
-          curl -fsSL "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl.tar.xz" -o "$ff"
-          mkdir -p "$RUNNER_TEMP/ffmpeg-linux"
-          tar -xJf "$ff" -C "$RUNNER_TEMP/ffmpeg-linux"
-          ffmpeg_bin="$(find "$RUNNER_TEMP/ffmpeg-linux" -type f -name ffmpeg | head -n 1)"
-          ffprobe_bin="$(find "$RUNNER_TEMP/ffmpeg-linux" -type f -name ffprobe | head -n 1)"
-          test -n "$ffmpeg_bin"
-          cp "$ffmpeg_bin" "$tools/ffmpeg"
-          if [ -n "$ffprobe_bin" ]; then cp "$ffprobe_bin" "$tools/ffprobe"; fi
-          deno_zip="$RUNNER_TEMP/deno-linux.zip"
-          curl -fsSL "https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip" -o "$deno_zip"
-          mkdir -p "$RUNNER_TEMP/deno-linux"
-          unzip -q "$deno_zip" -d "$RUNNER_TEMP/deno-linux"
-          cp "$RUNNER_TEMP/deno-linux/deno" "$tools/deno"
-          chmod +x "$tools/ffmpeg" "$tools/ffprobe" "$tools/aria2c" "$tools/deno"
-      - name: Prepare bundled media tools (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tools="$GITHUB_WORKSPACE/src-tauri/tools"
-          mkdir -p "$tools/lib"
-          curl -fsSL "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos" -o "$tools/yt-dlp"
-          chmod +x "$tools/yt-dlp"
-          brew install nasm aria2 dylibbundler
-          cp "$(brew --prefix aria2)/bin/aria2c" "$tools/aria2c"
-          dylibbundler -b -x "$tools/aria2c" -d "$tools/lib" -p @executable_path/lib
-          curl -fsSL "https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz" -o "$RUNNER_TEMP/ffmpeg-9.1.tar.xz"
-          tar -xf "$RUNNER_TEMP/ffmpeg-9.1.tar.xz" -C "$RUNNER_TEMP"
-          cd "$RUNNER_TEMP/ffmpeg-9.1"
-          ./configure --prefix="$RUNNER_TEMP/ffmpeg-install" --disable-gpl --disable-nonfree --disable-autodetect --enable-static --disable-shared --disable-debug --disable-doc --enable-ffmpeg --enable-ffprobe --disable-ffplay
-          make -j"$(sysctl -n hw.ncpu)"
-          make install
-          test -x "$RUNNER_TEMP/ffmpeg-install/bin/ffmpeg"
-          test -x "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe"
-          cp "$RUNNER_TEMP/ffmpeg-install/bin/ffmpeg" "$tools/ffmpeg"
-          cp "$RUNNER_TEMP/ffmpeg-install/bin/ffprobe" "$tools/ffprobe"
-          if [[ "$(uname -m)" == "arm64" ]]; then deno_target="aarch64-apple-darwin"; else deno_target="x86_64-apple-darwin"; fi
-          curl -fsSL "https://github.com/denoland/deno/releases/download/v2.9.8/deno-${deno_target}.zip" -o "$RUNNER_TEMP/deno-macos.zip"
-          mkdir -p "$RUNNER_TEMP/deno-macos"
-          unzip -q "$RUNNER_TEMP/deno-macos.zip" -d "$RUNNER_TEMP/deno-macos"
-          cp "$RUNNER_TEMP/deno-macos/deno" "$tools/deno"
-          chmod +x "$tools/aria2c" "$tools/ffmpeg" "$tools/ffprobe" "$tools/deno"
       - name: Verify bundled tools
         shell: bash
         run: |
@@ -148,17 +62,14 @@ jobs:
         run: npm install
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
-      - name: Build desktop app
-        run: npm run tauri build
-      - name: Run Rust unit tests
-        if: runner.os == 'Linux'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
-      - name: Upload desktop packages
+      - name: Build Windows EXE installer
+        run: npm run tauri build -- --bundles nsis
+      - name: Upload Windows EXE
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.path }}
-          if-no-files-found: warn
+          name: windows-exe
+          path: src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
           retention-days: 14
 
   android:
@@ -178,7 +89,7 @@ jobs:
           packages: platform-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
       - name: Install Android SDK packages
         run: |
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
@@ -206,8 +117,19 @@ jobs:
                   "android {\n    packaging { jniLibs { useLegacyPackaging = true } }\n",
                   1
               )
+          abi_match = re.search(r'(?m)^(\s*abiFilters\s*\+=\s*)listOf\([^)]*\)', content)
+          if abi_match:
+              content = content[:abi_match.start()] + abi_match.group(1) + 'listOf("arm64-v8a")' + content[abi_match.end():]
+          else:
+              match = re.search(r"(?m)^(\s*defaultConfig\s*\{)", content)
+              if not match:
+                  raise SystemExit("Could not find defaultConfig in build.gradle.kts")
+              pos = match.end()
+              content = content[:pos] + '\n        ndk { abiFilters += listOf("arm64-v8a") }' + content[pos:]
+          if re.search(r'abiFilters.*(x86|armeabi|arm32)', content):
+              raise SystemExit("Non-ARM64 Android ABI filters remain configured.")
           gradle.write_text(content)
-          print("Android compileSdk/targetSdk API 36; JNI legacy packaging enabled; ABIs: arm64-v8a, x86_64")
+          print("Android compileSdk/targetSdk API 36; JNI legacy packaging enabled; ABI: arm64-v8a")
           PY
       - name: Prepare Android JavaScript runtime (QuickJS)
         shell: bash
@@ -220,11 +142,11 @@ jobs:
           ndk="$ANDROID_HOME/ndk/27.2.12479018"
           toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
           source_dir="$RUNNER_TEMP/quickjs-ng"
-          for abi in arm64-v8a x86_64; do
+          for abi in arm64-v8a; do
             build="$RUNNER_TEMP/quickjs-build-$abi"
             case "$abi" in
               arm64-v8a) triple="aarch64-linux-android" ;;
-              x86_64) triple="x86_64-linux-android" ;;
+  
             esac
             cc="$toolchain/${triple}24-clang"
             cmake -S "$source_dir" -B "$build" \
@@ -235,20 +157,40 @@ jobs:
             cmake --build "$build" --target qjs_exe -j2
             qjs_bin="$build/qjs"
             test -x "$qjs_bin"
-            if [[ "$abi" == "arm64-v8a" ]]; then
-              "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*AArch64"
-            else
-              "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*X86-64"
-            fi
+            "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*AArch64"
             mkdir -p "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi"
             cp "$qjs_bin" "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
             chmod 755 "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
             file "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
           done
+      - name: Prepare Android browser TLS wheels (curl-cffi)
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="src-tauri/tauri-plugin-media/android/src/main/assets/python-wheels"
+          mkdir -p "$wheel_dir"
+          for platform in android_24_arm64_v8a; do
+            python -m pip download \
+              --disable-pip-version-check \
+              --only-binary=:all: --no-deps \
+              --extra-index-url "https://pypi.flet.dev" \
+              --dest "$wheel_dir" \
+              --platform "$platform" \
+              --python-version 3.13 --implementation cp --abi cp313 \
+              "curl-cffi==0.16.3" "cffi==2.1.1"
+          done
+          python -m pip download \
+            --disable-pip-version-check \
+            --only-binary=:all: --no-deps \
+            --dest "$wheel_dir" "pycparser==2.23"
+          ls -lh "$wheel_dir"
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'curl_cffi-0.16.3*android_24_arm64_v8a.whl' | wc -l)" -eq 1
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'cffi-2.1.1*android_24_arm64_v8a.whl' | wc -l)" -eq 1
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'pycparser-*.whl' | wc -l)" -eq 1
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
-      - name: Build APKs
-        run: npm run tauri android build -- --apk --split-per-abi
+      - name: Build ARM64 APK
+        run: npm run tauri android build -- --apk --split-per-abi --target aarch64
       - name: Sign and validate Android APKs
         shell: bash
         env:
@@ -262,10 +204,10 @@ jobs:
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           keystore="$RUNNER_TEMP/downbest-signing.keystore"
 
-          # The embedded yt-dlp runtime is distributed for 64-bit Android only.
-          # Tauri may still emit 32-bit split APKs; do not sign or publish them.
+          # DownBest Android media runtime is built for ARM64 only.
+          # Remove any unexpected non-ARM64 outputs before signing.
           find "$apk_dir" -type f -name '*-unsigned.apk' \
-            \( -path '*/arm/*' -o -path '*/x86/*' \) -delete
+            \( ! -path '*/arm64/*' \) -delete
           mapfile -t unsigned_apks < <(find "$apk_dir" -type f -name '*-unsigned.apk' -print | sort)
           if [ "${#unsigned_apks[@]}" -eq 0 ]; then
             echo "No unsigned APKs were produced." >&2
@@ -323,11 +265,11 @@ jobs:
 
             abi_dir="${unsigned_apk#"$apk_dir"/}"
             abi_dir="${abi_dir%%/*}"
-            case "$abi_dir" in
-              arm64) native_abi="arm64-v8a" ;;
-              x86_64) native_abi="x86_64" ;;
-              *) echo "Unexpected APK ABI folder: $abi_dir" >&2; exit 1 ;;
-            esac
+            if [[ "$abi_dir" != "arm64-v8a" && "$abi_dir" != "arm64" ]]; then
+              echo "Unexpected non-ARM64 APK folder: $abi_dir" >&2
+              exit 1
+            fi
+            native_abi="arm64-v8a"
             unzip -Z1 "$signed_apk" | grep -qx "lib/$native_abi/libdownbest_lib.so" || {
               echo "Expected $native_abi native library is missing from $signed_apk" >&2
               exit 1
@@ -348,77 +290,4 @@ jobs:
           name: android-apks
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
-          retention-days: 14
-
-  ios-rust-check:
-    name: iOS Rust compile check (unsigned)
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
-      - name: Install frontend dependencies
-        run: npm install
-      - name: Prepare Tauri frontend assets
-        run: |
-          npm run build
-          npm run tauri icon app-icon.svg
-      - name: Link Tauri iOS API for swift-rs
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo fetch --manifest-path src-tauri/Cargo.toml
-          tauri_ios_api="$(find "$HOME/.cargo/registry/src" -type d -path '*/tauri-*/mobile/ios-api' -print | sort | tail -n 1)"
-          if [[ -z "$tauri_ios_api" ]]; then
-            echo "Could not locate the Tauri iOS Swift API package in the Cargo registry." >&2
-            exit 1
-          fi
-          dependency_path="$GITHUB_WORKSPACE/../../crates/tauri/mobile/ios-api"
-          mkdir -p "$(dirname "$dependency_path")"
-          ln -sfn "$tauri_ios_api" "$dependency_path"
-          echo "Linked swift-rs Tauri API package to $tauri_ios_api"
-      - name: Compile unsigned iOS device and simulator targets
-        shell: bash
-        run: |
-          set -euo pipefail
-          SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)" cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios --lib
-          SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)" cargo check --manifest-path src-tauri/Cargo.toml --target aarch64-apple-ios-sim --lib
-
-  ios:
-    name: iOS IPA (requires Apple signing setup)
-    if: ${{ vars.ENABLE_SIGNED_IOS_BUILD == 'true' }}
-    runs-on: macos-15
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-ios,aarch64-apple-ios-sim
-      - name: Install frontend dependencies
-        run: npm install
-      - name: Initialize iOS project
-        run: npm run tauri ios init
-      - name: Generate app icons
-        run: npm run tauri icon app-icon.svg
-      - name: Build iOS IPA
-        env:
-          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_DEVELOPMENT_TEAM }}
-          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
-          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
-          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
-        run: npm run tauri ios build -- --export-method app-store-connect
-      - name: Upload iOS IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios-ipa
-          path: src-tauri/gen/apple/build/arm64/*.ipa
-          if-no-files-found: warn
           retention-days: 14

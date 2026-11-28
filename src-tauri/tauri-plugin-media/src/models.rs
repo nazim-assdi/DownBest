@@ -34,6 +34,8 @@ pub struct MediaProgress {
     pub downloaded_bytes: u64,
     #[serde(default)]
     pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub speed_bytes_sec: u64,
     pub eta_seconds: Option<u64>,
     pub line: String,
 }

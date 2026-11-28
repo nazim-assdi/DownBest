@@ -73,7 +73,7 @@ struct DownloadRecord {
     id: String, url: String, file_name: String, kind: String, status: String,
     destination: String, file_path: Option<String>, downloaded: Arc<AtomicU64>, total: Option<u64>,
     started: Instant, error: Option<String>, cancel: CancellationToken,
-    progress_override: Option<f64>, concurrency: usize,
+    progress_override: Option<f64>, speed_bytes_sec: u64, concurrency: usize,
     etag: Option<String>, last_modified: Option<String>,
     cookies_file: Option<String>,
     format_selector: Option<String>,
@@ -126,10 +126,36 @@ impl DownloadManager {
                 let was_cancelled = item.cancel_requested;
                 let was_interrupted = matches!(item.status.as_str(),
                     "Queued" | "Connecting" | "Extracting media" | "Downloading" | "Retrying");
+                // A final output can be committed just before the app exits but before
+                // the queue status is persisted as Completed. Recover that file rather
+                // than automatically downloading the same media again on next launch.
+                let recovered_output = if was_interrupted {
+                    item.file_path.as_deref().map(PathBuf::from).filter(|path| path.is_file())
+                        .or_else(|| {
+                            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                            {
+                                find_completed_media_output(&PathBuf::from(&item.destination), &item.id)
+                            }
+                            #[cfg(any(target_os = "android", target_os = "ios"))]
+                            {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+                let recovered_file = recovered_output.is_some();
+                let recovered_output_path = recovered_output.as_ref()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let recovered_bytes = recovered_output.as_ref()
+                    .and_then(|path| std::fs::metadata(path).ok())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(item.downloaded_bytes);
+                let is_completed = item.status == "Completed" || recovered_file;
                 let identity = Url::parse(&item.url).ok().map(|url| download_identity_key(&url));
                 let duplicate_interrupted_job = if was_cancelled {
                     false
-                } else if item.status == "Completed" {
+                } else if is_completed {
                     if let Some(key) = identity { seen_media.insert(key); }
                     false
                 } else if let Some(key) = identity {
@@ -140,6 +166,8 @@ impl DownloadManager {
                 let should_cancel = was_cancelled || duplicate_interrupted_job;
                 let status = if should_cancel {
                     "Cancelled".to_string()
+                } else if is_completed {
+                    "Completed".to_string()
                 } else if was_interrupted {
                     "Queued".to_string()
                 } else {
@@ -151,10 +179,14 @@ impl DownloadManager {
                 let id = item.id.clone();
                 records.insert(id.clone(), DownloadRecord {
                     id: item.id, url: item.url, file_name: item.file_name, kind: item.kind,
-                    status, destination: item.destination, file_path: item.file_path,
-                    downloaded: Arc::new(AtomicU64::new(item.downloaded_bytes)),
-                    total: item.total_bytes, started: Instant::now(), error: item.error,
-                    cancel: CancellationToken::new(), progress_override: None,
+                    status, destination: item.destination, file_path: recovered_output_path.or(item.file_path),
+                    downloaded: Arc::new(AtomicU64::new(recovered_bytes)),
+                    total: if recovered_file { Some(recovered_bytes) } else { item.total_bytes },
+                    started: Instant::now(),
+                    error: if recovered_file { None } else { item.error },
+                    cancel: CancellationToken::new(),
+                    progress_override: if is_completed { Some(100.0) } else { None },
+                    speed_bytes_sec: 0,
                     concurrency: item.concurrency.clamp(1, 16),
                     etag: item.etag, last_modified: item.last_modified,
                     cookies_file: item.cookies_file,
@@ -165,7 +197,7 @@ impl DownloadManager {
                     cancel_requested: Arc::new(AtomicBool::new(should_cancel)),
                 });
                 if should_cancel { cancelled_ids.push(id); }
-                else if was_interrupted { auto_resume_ids.push(id); }
+                else if was_interrupted && !is_completed { auto_resume_ids.push(id); }
             }
         }
         for id in cancelled_ids {
@@ -258,6 +290,17 @@ fn cleanup_job_cookies(manager: &DownloadManager, id: &str) {
     persist_records(manager);
 }
 
+fn job_work_dir(id: &str) -> PathBuf {
+    std::env::temp_dir().join("DownBest").join("work").join(id)
+}
+
+fn cleanup_job_workspaces(destination: &Path, id: &str) {
+    let _ = std::fs::remove_dir_all(job_work_dir(id));
+    // Remove temporary folders used by both the current and older releases.
+    let _ = std::fs::remove_dir_all(destination.join(format!(".downbest-{id}")));
+    let _ = std::fs::remove_dir_all(destination.join(format!(".downbest-work-{id}")));
+}
+
 fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
     let (destination, file_path) = match manager.records.lock() {
         Ok(records) => match records.get(id) {
@@ -275,8 +318,12 @@ fn cleanup_cancelled_files(manager: &DownloadManager, id: &str) {
         let checkpoint_staging = checkpoint.with_extension("hls.tmp");
         let _ = std::fs::remove_file(checkpoint_staging);
     }
-    let parts = destination.join(format!(".downbest-{id}"));
-    let _ = std::fs::remove_dir_all(parts);
+    let _ = std::fs::remove_dir_all(job_work_dir(id));
+    // Remove legacy work folders created by earlier DownBest builds.
+    let legacy_parts = destination.join(format!(".downbest-{id}"));
+    let _ = std::fs::remove_dir_all(legacy_parts);
+    let legacy_media = destination.join(format!(".downbest-work-{id}"));
+    let _ = std::fs::remove_dir_all(legacy_media);
 
     let site_job_suffix = if cfg!(target_os = "android") { id.to_string() } else { id.chars().take(8).collect() };
     let marker = format!(" - {site_job_suffix}.");
@@ -304,11 +351,19 @@ fn partial_bytes_for(record: &DownloadRecord) -> u64 {
             found_partial = true;
         }
     }
-    let parts = PathBuf::from(&record.destination).join(format!(".downbest-{}", record.id));
-    if let Ok(entries) = std::fs::read_dir(parts) {
-        for entry in entries.flatten() {
-            bytes = bytes.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
-            found_partial = true;
+    for parts in [
+        job_work_dir(&record.id).join("http-parts"),
+        PathBuf::from(&record.destination).join(format!(".downbest-{}", record.id)),
+    ] {
+        if let Ok(entries) = std::fs::read_dir(parts) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy() == "manifest" { continue; }
+                let Ok(metadata) = entry.metadata() else { continue; };
+                if metadata.is_file() {
+                    bytes = bytes.saturating_add(metadata.len());
+                    found_partial = true;
+                }
+            }
         }
     }
     if found_partial { bytes } else { record.downloaded.load(Ordering::Relaxed) }
@@ -330,12 +385,20 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
         .map(|n| (downloaded as f64 / n as f64 * 100.0).clamp(0.0, 100.0)).unwrap_or(0.0);
     let progress = record.progress_override.unwrap_or(calculated);
     let elapsed = record.started.elapsed().as_secs_f64().max(0.5);
+    let is_media_transfer = record.media_activity.is_some() || record.media_title.is_some();
+    let average_speed = (downloaded as f64 / elapsed) as u64;
     DownloadView {
         id: record.id.clone(), url: record.url.clone(), file_name: record.file_name.clone(),
         kind: record.kind.clone(), status: record.status.clone(), destination: record.destination.clone(),
         file_path: record.file_path.clone(), downloaded_bytes: downloaded, total_bytes: record.total,
         speed_bytes_sec: if matches!(record.status.as_str(), "Downloading" | "Extracting media") {
-            (downloaded as f64 / elapsed) as u64
+            if record.speed_bytes_sec > 0 {
+                record.speed_bytes_sec
+            } else if is_media_transfer {
+                0
+            } else {
+                average_speed
+            }
         } else { 0 },
         progress, error: record.error.clone(),
         media_title: record.media_title.clone(),
@@ -346,10 +409,16 @@ fn view_of(record: &DownloadRecord) -> DownloadView {
 fn set_status(manager: &DownloadManager, id: &str, status: &str, error: Option<String>) {
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
-            if record.status != status && matches!(status, "Downloading" | "Extracting media") {
+            if record.status != status && matches!(status, "Connecting" | "Downloading" | "Extracting media") {
                 record.started = Instant::now();
+                record.speed_bytes_sec = 0;
             }
-            if status == "Completed" { record.progress_override = Some(100.0); }
+            if status == "Completed" {
+                record.progress_override = Some(100.0);
+                record.speed_bytes_sec = 0;
+            } else if matches!(status, "Paused" | "Failed" | "Cancelled") {
+                record.speed_bytes_sec = 0;
+            }
             record.status = status.to_string();
             record.error = error;
             if status == "Extracting media" {
@@ -436,6 +505,7 @@ fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &
             if let Some(total) = progress.total_bytes.filter(|value| *value > 0) {
                 record.total = Some(total);
             }
+            record.speed_bytes_sec = progress.speed_bytes_sec;
             record.progress_override = Some(progress.progress.clamp(0.0, 100.0));
             if let Some(activity) = media_activity_from_line(&progress.line) {
                 record.media_activity = Some(activity.to_string());
@@ -443,6 +513,37 @@ fn update_mobile_media_progress(manager: &DownloadManager, id: &str, progress: &
             if progress.downloaded_bytes > 0 && record.status != "Downloading" {
                 record.started = Instant::now();
                 record.status = "Downloading".into();
+                record.media_activity = Some("Downloading media".into());
+                record.error = None;
+            }
+        }
+    }
+}
+
+fn apply_media_progress_values(
+    manager: &DownloadManager,
+    id: &str,
+    downloaded: Option<u64>,
+    total: Option<u64>,
+    speed: Option<u64>,
+) {
+    if let Ok(mut records) = manager.records.lock() {
+        if let Some(record) = records.get_mut(id) {
+            if let Some(value) = downloaded {
+                record.downloaded.store(value, Ordering::Relaxed);
+            }
+            if let Some(value) = total.filter(|value| *value > 0) {
+                record.total = Some(value);
+            }
+            if let Some(value) = speed {
+                record.speed_bytes_sec = value;
+            }
+            if downloaded.unwrap_or(0) > 0 || speed.unwrap_or(0) > 0 {
+                if record.status != "Downloading" {
+                    record.started = Instant::now();
+                }
+                record.status = "Downloading".into();
+                record.media_activity = Some("Downloading media".into());
                 record.error = None;
             }
         }
@@ -454,21 +555,97 @@ fn update_media_progress(manager: &DownloadManager, id: &str, data: &str) {
     let downloaded = fields.first().and_then(|value| value.parse::<u64>().ok());
     let total = fields.get(1).and_then(|value| value.parse::<u64>().ok())
         .or_else(|| fields.get(2).and_then(|value| value.parse::<u64>().ok()));
-    if let Ok(mut records) = manager.records.lock() {
-        if let Some(record) = records.get_mut(id) {
-            if let Some(value) = downloaded {
-                record.downloaded.store(value, Ordering::Relaxed);
-            }
-            if let Some(value) = total {
-                record.total = Some(value);
-            }
-            if downloaded.unwrap_or(0) > 0 && record.status != "Downloading" {
-                record.started = Instant::now();
-                record.status = "Downloading".into();
-                record.error = None;
-            }
-        }
+    let speed = fields.get(3).and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as u64);
+    apply_media_progress_values(manager, id, downloaded, total, speed);
+}
+
+fn parse_human_byte_count(raw: &str) -> Option<u64> {
+    let value = raw.trim().trim_start_matches('~').replace(',', "");
+    let number_end = value.find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))?;
+    let number = value[..number_end].parse::<f64>().ok()?;
+    if !number.is_finite() || number < 0.0 { return None; }
+    let unit = value[number_end..].trim().to_ascii_lowercase();
+    let multiplier = match unit.as_str() {
+        "" | "b" => 1.0,
+        "kib" => 1024.0,
+        "mib" => 1024.0_f64.powi(2),
+        "gib" => 1024.0_f64.powi(3),
+        "tib" => 1024.0_f64.powi(4),
+        "kb" => 1000.0,
+        "mb" => 1000.0_f64.powi(2),
+        "gb" => 1000.0_f64.powi(3),
+        "tb" => 1000.0_f64.powi(4),
+        _ => return None,
+    };
+    Some((number * multiplier).round().min(u64::MAX as f64) as u64)
+}
+
+// yt-dlp's custom progress template can be buffered by Windows when its output
+// is captured without a console. Parse the normal --newline progress line too,
+// so the desktop queue remains live even when the custom marker arrives late.
+fn parse_yt_dlp_progress_line(line: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
+    let download = line.find("[download]")?;
+    let progress_line = &line[download + "[download]".len()..];
+    let percent_end = progress_line.find('%')?;
+    let percent = progress_line[..percent_end].split_whitespace().last()?
+        .parse::<f64>().ok()?;
+    if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+        return None;
     }
+
+    let after_percent = &progress_line[percent_end + 1..];
+    let total = after_percent.split_once("of ")
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .and_then(parse_human_byte_count);
+    let downloaded = total.map(|bytes| {
+        (bytes as f64 * percent / 100.0).round().clamp(0.0, bytes as f64) as u64
+    });
+    let speed = progress_line.rsplit_once(" at ")
+        .and_then(|(_, tail)| tail.split_whitespace().next())
+        .and_then(|value| value.strip_suffix("/s"))
+        .and_then(parse_human_byte_count);
+    if downloaded.is_none() && total.is_none() && speed.is_none() {
+        None
+    } else {
+        Some((downloaded, total, speed))
+    }
+}
+
+fn parse_aria2_progress_line(line: &str) -> Option<(Option<u64>, Option<u64>, Option<u64>)> {
+    let start = line.find("[#")?;
+    let end = line[start..].find(']')? + start;
+    let progress = &line[start + 2..end];
+    let transfer = progress.split_whitespace()
+        .find(|value| value.contains('/') && value.contains('('))
+        .or_else(|| progress.split_whitespace().find(|value| value.contains('/')))?;
+    let (downloaded, total_and_percent) = transfer.split_once('/')?;
+    let total = total_and_percent.split('(').next().and_then(parse_human_byte_count);
+    let downloaded = parse_human_byte_count(downloaded);
+    let speed = progress.split_whitespace()
+        .find_map(|value| value.strip_prefix("DL:"))
+        .and_then(parse_human_byte_count);
+    if downloaded.is_none() && total.is_none() && speed.is_none() {
+        None
+    } else {
+        Some((downloaded, total, speed))
+    }
+}
+
+fn update_media_progress_from_line(manager: &DownloadManager, id: &str, line: &str) {
+    if let Some(index) = line.find("__DOWNBEST__") {
+        update_media_progress(manager, id, &line[index + "__DOWNBEST__".len()..]);
+        return;
+    }
+    if let Some((downloaded, total, speed)) = parse_aria2_progress_line(line) {
+        apply_media_progress_values(manager, id, downloaded, total, speed);
+        return;
+    }
+    if let Some((downloaded, total, speed)) = parse_yt_dlp_progress_line(line) {
+        apply_media_progress_values(manager, id, downloaded, total, speed);
+    }
+    set_media_activity_from_line(manager, id, line);
 }
 
 fn progress_counter(manager: &DownloadManager, id: &str) -> Result<Arc<AtomicU64>, String> {
@@ -605,6 +782,7 @@ fn spawn_download_task(
         let _ = saver.await;
         match result {
             Ok(()) => {
+                cleanup_job_workspaces(&destination, &id);
                 set_status(&manager, &id, "Completed", None);
                 cleanup_job_cookies(&manager, &id);
             },
@@ -852,7 +1030,10 @@ async fn inspect_media_json(
         let mut command = Command::new(&yt_dlp);
         configure_tool_environment(&mut command, &yt_dlp);
         configure_no_console(&mut command);
-        command.arg("--dump-single-json").arg("--skip-download")
+        // Bundled desktop yt-dlp standalone builds include curl-cffi.
+        // Ask for Chrome TLS/client fingerprint during metadata extraction.
+        command.arg("--impersonate").arg("chrome")
+            .arg("--dump-single-json").arg("--skip-download")
             .arg("--no-warnings").arg("--no-progress").arg("--no-colors")
             .arg("--no-call-home").arg("--retries").arg("2").arg("--socket-timeout").arg("20");
         if flat_playlist {
@@ -994,6 +1175,7 @@ fn normalize_download_kind(kind: &str) -> &'static str {
     match kind {
         "file" => "file",
         "audio" => "audio",
+        "video-only" => "video-only",
         _ => "auto",
     }
 }
@@ -1088,7 +1270,7 @@ async fn start_download(
         kind: kind.clone(), status: "Queued".into(),
         destination: destination_path.display().to_string(), file_path: None,
         downloaded: Arc::new(AtomicU64::new(0)), total: None, started: Instant::now(),
-        error: None, cancel: cancel.clone(), progress_override: None,
+        error: None, cancel: cancel.clone(), progress_override: None, speed_bytes_sec: 0,
         concurrency: requested, etag: None, last_modified: None,
         cookies_file: cookies_file.clone(),
         format_selector: format_selector.clone(),
@@ -1102,14 +1284,21 @@ async fn start_download(
     {
         let mut records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
         let identity = download_identity_key(&parsed);
-        let duplicate_name = records.values().find(|existing| {
+        let duplicate = records.values().find(|existing| {
             !matches!(existing.status.as_str(), "Cancelled")
                 && Url::parse(&existing.url).map(|other| download_identity_key(&other) == identity).unwrap_or(false)
-        }).map(|existing| existing.media_title.clone().unwrap_or_else(|| existing.file_name.clone()));
-        if let Some(name) = duplicate_name {
+        }).map(|existing| (
+            existing.media_title.clone().unwrap_or_else(|| existing.file_name.clone()),
+            existing.status == "Completed",
+        ));
+        if let Some((name, already_completed)) = duplicate {
             drop(records);
             if let Some(path) = cookies_file.as_deref() { let _ = std::fs::remove_file(path); }
-            return Err(format!("Already in the queue: {name}. Resume or manage the existing queue item instead of adding it again."));
+            return Err(if already_completed {
+                format!("Already completed: {name}. This video is already saved and cannot be downloaded or resumed again.")
+            } else {
+                format!("Already in the queue: {name}. Resume or manage the existing queue item instead of adding it again.")
+            });
         }
         records.insert(id.clone(), record);
     }
@@ -1230,6 +1419,9 @@ fn clear_finished(manager: State<'_, DownloadManager>) -> Result<(), String> {
     for item in records.values().filter(|item| matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled")) {
         if let Some(path) = item.cookies_file.as_ref() { let _ = std::fs::remove_file(path); }
     }
+    for item in records.values().filter(|item| matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled")) {
+        cleanup_job_workspaces(Path::new(&item.destination), &item.id);
+    }
     records.retain(|_, item| !matches!(item.status.as_str(), "Completed" | "Failed" | "Cancelled"));
     drop(records);
     persist_records(manager.inner());
@@ -1310,6 +1502,7 @@ async fn execute_download(
     set_file_name(&manager, &id, target.file_name().and_then(|s| s.to_str()).unwrap_or(&name));
     set_status(&manager, &id, "Downloading", None);
     download_http(&client, &url, &mut target, &destination, &id, concurrency, &manager, &cancel).await?;
+    let _ = fs::remove_dir_all(job_work_dir(&id)).await;
     set_file_path(&manager, &id, &target);
     Ok(())
 }
@@ -1558,8 +1751,8 @@ fn reserve_response_path(
 }
 
 fn effective_segment_count(total_bytes: u64, requested: usize) -> usize {
-    const MIN_PARALLEL_FILE: u64 = 16 * 1024 * 1024;
-    const TARGET_SEGMENT_BYTES: u64 = 8 * 1024 * 1024;
+    const MIN_PARALLEL_FILE: u64 = 8 * 1024 * 1024;
+    const TARGET_SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
     if total_bytes < MIN_PARALLEL_FILE {
         return 1;
     }
@@ -1631,7 +1824,7 @@ async fn download_http(
 ) -> Result<(), String> {
     let original_temp = PathBuf::from(format!("{}.downbest-{}.tmp", target.display(), id));
     let previous_len = fs::metadata(&original_temp).await.map(|meta| meta.len()).unwrap_or(0);
-    let parts_dir = destination.join(format!(".downbest-{id}"));
+    let parts_dir = job_work_dir(id).join("http-parts");
     let (previous_etag, previous_modified) = saved_validators(manager, id);
     let probe = tokio::time::timeout(
         std::time::Duration::from_secs(30),
@@ -1691,7 +1884,7 @@ async fn download_http(
         if count > 1 || has_segment_parts {
             drop(probe);
             let progress = progress_counter(manager, id)?;
-            match download_segmented(client, url, target.as_path(), destination, id, total, count, progress, cancel).await {
+            match download_segmented(client, url, target.as_path(), id, total, count, progress, cancel).await {
                 Ok(()) => Ok(()),
                 Err(error) if error == "Cancelled" => Err(error),
                 Err(error) if error.contains("stopped supporting parallel ranges") => {
@@ -1873,12 +2066,25 @@ async fn stream_to_target(
 }
 
 async fn download_segmented(
-    client: &Client, url: &str, target: &Path, destination: &Path, id: &str,
+    client: &Client, url: &str, target: &Path, id: &str,
     total: u64, count: usize, progress: Arc<AtomicU64>,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let parts_dir = destination.join(format!(".downbest-{id}"));
+    let parts_dir = job_work_dir(id).join("http-parts");
     fs::create_dir_all(&parts_dir).await.map_err(|e| format!("Cannot create temporary folder: {e}"))?;
+    // Part N is tied to the exact total size and segment count. A changed speed
+    // profile must not append old bytes into new byte ranges after restart.
+    let manifest_path = parts_dir.join("manifest");
+    let expected_manifest = format!("{total}:{count}");
+    let previous_manifest = fs::read_to_string(&manifest_path).await.ok();
+    if previous_manifest.as_deref() != Some(expected_manifest.as_str()) {
+        fs::remove_dir_all(&parts_dir).await
+            .map_err(|error| format!("Could not reset incompatible download parts: {error}"))?;
+        fs::create_dir_all(&parts_dir).await
+            .map_err(|error| format!("Cannot recreate temporary download folder: {error}"))?;
+        fs::write(&manifest_path, &expected_manifest).await
+            .map_err(|error| format!("Could not save download range layout: {error}"))?;
+    }
     let chunk_size = (total + count as u64 - 1) / count as u64;
     let mut existing_total = 0u64;
     let mut jobs = Vec::new();
@@ -1954,7 +2160,16 @@ async fn download_piece(
             let _ = file.get_ref().sync_data().await;
             return Err("Cancelled".into());
         },
-        item = stream.next() => item,
+        item = tokio::time::timeout(std::time::Duration::from_secs(90), stream.next()) => {
+            match item {
+                Ok(item) => item,
+                Err(_) => {
+                    let _ = file.flush().await;
+                    let _ = file.get_ref().sync_data().await;
+                    return Err("Download stalled: no data was received for 90 seconds. The range part was saved; retry to continue.".into());
+                }
+            }
+        },
     } {
         let chunk = match item {
             Ok(chunk) => chunk,
@@ -2034,10 +2249,14 @@ async fn run_media_download(
 
 #[cfg(target_os = "android")]
 async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, id: &str) -> Result<(), String> {
-    let source_path = {
+    let (source_path, destination) = {
         let records = manager.records.lock().map_err(|_| "Download queue is unavailable.".to_string())?;
-        records.get(id).and_then(|record| record.file_path.clone())
-            .ok_or_else(|| "The completed download has no output file to publish.".to_string())?
+        let record = records.get(id).ok_or_else(|| "Download record was not found.".to_string())?;
+        (
+            record.file_path.clone()
+                .ok_or_else(|| "The completed download has no output file to publish.".to_string())?,
+            PathBuf::from(&record.destination),
+        )
     };
     if !Path::new(&source_path).is_file() {
         return Err("The finished file is missing before it could be copied to Downloads.".into());
@@ -2047,17 +2266,26 @@ async fn publish_completed_download(app: &AppHandle, manager: &DownloadManager, 
         handle.media().publish_download(MediaPublishRequest { file_path: source_path })
     }).await.map_err(|error| format!("Android Downloads worker failed: {error}"))?
         .map_err(|error| format!("Could not publish the finished file to Downloads: {error}"))?;
-    if !published.content_uri.starts_with("content://") {
-        return Err("Android returned an invalid public file location.".into());
+    let is_public_download = published.content_uri.starts_with("content://");
+    let is_app_download = Path::new(&published.content_uri).is_file();
+    if !is_public_download && !is_app_download {
+        return Err("Android returned an invalid downloaded file location.".into());
     }
     if let Ok(mut records) = manager.records.lock() {
         if let Some(record) = records.get_mut(id) {
             record.file_name = published.file_name;
             record.file_path = Some(published.content_uri);
-            record.destination = "Downloads".into();
+            record.destination = if is_public_download {
+                "Downloads".into()
+            } else {
+                "App downloads".into()
+            };
         }
     }
     persist_records(manager);
+    let workspace = destination.join(format!(".downbest-work-{id}"));
+    let _ = fs::remove_dir_all(workspace).await;
+    let _ = fs::remove_dir_all(job_work_dir(id)).await;
     Ok(())
 }
 
@@ -2074,8 +2302,8 @@ async fn open_download(
             records.get(&id).and_then(|record| record.file_path.clone())
                 .ok_or_else(|| "The saved file location is unavailable.".to_string())?
         };
-        if !content_uri.starts_with("content://") {
-            return Err("This item is not saved in the public Downloads folder.".into());
+        if !content_uri.starts_with("content://") && !Path::new(&content_uri).is_file() {
+            return Err("The saved download location is no longer available.".into());
         }
         let handle = app.clone();
         tokio::task::spawn_blocking(move || {
@@ -2138,6 +2366,37 @@ fn find_completed_media_output(destination: &Path, id: &str) -> Option<PathBuf> 
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn consume_process_output<R, F>(stream: R, mut on_line: F)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    F: FnMut(String),
+{
+    let mut reader = BufReader::new(stream);
+    let mut buffer = [0u8; 4096];
+    let mut pending = Vec::new();
+
+    loop {
+        let count = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        for byte in &buffer[..count] {
+            if *byte == b'\n' || *byte == b'\r' {
+                if !pending.is_empty() {
+                    on_line(String::from_utf8_lossy(&pending).into_owned());
+                    pending.clear();
+                }
+            } else {
+                pending.push(*byte);
+            }
+        }
+    }
+    if !pending.is_empty() {
+        on_line(String::from_utf8_lossy(&pending).into_owned());
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn run_media_download(
     app: &AppHandle, manager: &DownloadManager, id: &str, url: &Url, kind: &str,
     destination: &Path, concurrency: usize, cookies_file: Option<&str>,
@@ -2147,19 +2406,27 @@ async fn run_media_download(
         "yt-dlp was not found. Install yt-dlp or place it in the app's tools folder to download from media sites.".to_string())?;
     let has_ffmpeg = find_tool(app, "ffmpeg").is_some();
     let aria2 = find_tool(app, "aria2c");
+    let media_work_dir = job_work_dir(id).join("media");
+    fs::create_dir_all(&media_work_dir).await
+        .map_err(|error| format!("Could not prepare private media download workspace: {error}"))?;
     let mut command = Command::new(&yt_dlp);
     configure_tool_environment(&mut command, &yt_dlp);
     configure_no_console(&mut command);
-    command.arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
+    // Use a real browser-like TLS handshake for site extractors and media requests.
+    command.arg("--impersonate").arg("chrome")
+        .arg("--no-playlist").arg("--newline").arg("--progress").arg("--continue")
         .arg("--socket-timeout").arg("20")
         .arg("--retries").arg("4").arg("--fragment-retries").arg("4")
         .arg("--extractor-retries").arg("2").arg("--file-access-retries").arg("2")
         .arg("-N").arg(concurrency.to_string())
         .arg("--postprocessor-args").arg("ffmpeg:-threads 2")
-        .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s")
+        .arg("--progress-template").arg("download:__DOWNBEST__%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s")
+        .arg("--progress-delta").arg("0.5")
         .arg("--print").arg("before_dl:__DOWNBEST_TITLE__%(title)s")
         .arg("--print").arg("after_move:__DOWNBEST_FILE__%(filepath)s")
-        .arg("-P").arg(destination).arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
+        .arg("-P").arg(format!("home:{}", destination.display()))
+        .arg("-P").arg(format!("temp:{}", media_work_dir.display()))
+        .arg("-o").arg(format!("%(title).180B [%(id)s] - {}.%(ext)s", &id[..8]));
     let selected_format = selected_media_format(kind, format_selector, has_ffmpeg)?;
     command.arg("-f").arg(selected_format);
     if kind == "audio" && has_ffmpeg {
@@ -2180,7 +2447,10 @@ async fn run_media_download(
         // handles DASH/HLS fragments so fragment scheduling remains protocol-aware.
         command.arg("--downloader").arg("aria2c")
             .arg("--downloader").arg("dash,m3u8:native")
-            .arg("--downloader-args").arg(format!("aria2c:-c -x {} -s {} -k 4M", concurrency.clamp(2, 16), concurrency.clamp(2, 16)));
+            .arg("--downloader-args").arg(format!(
+                "aria2c:-c -x {} -s {} -k 4M --summary-interval=1 --show-console-readout=true",
+                concurrency.clamp(2, 16), concurrency.clamp(2, 16)
+            ));
         if let Some(parent) = aria_path.parent() {
             let mut paths = vec![parent.to_path_buf()];
             paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
@@ -2197,8 +2467,7 @@ async fn run_media_download(
     let stdout_manager = manager.clone();
     let stdout_id = id.to_string();
     let stdout_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        consume_process_output(stdout, |line| {
             if let Some(index) = line.find("__DOWNBEST_TITLE__") {
                 let title = line[index + "__DOWNBEST_TITLE__".len()..].trim();
                 if !title.is_empty() {
@@ -2211,21 +2480,16 @@ async fn run_media_download(
                     set_file_path(&stdout_manager, &stdout_id, Path::new(value));
                 }
             }
-        }
+            update_media_progress_from_line(&stdout_manager, &stdout_id, &line);
+        }).await;
     });
 
     let progress_manager = manager.clone();
     let progress_id = id.to_string();
     let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
         let mut captured = String::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(index) = line.find("__DOWNBEST__") {
-                let data = &line[index + "__DOWNBEST__".len()..];
-                update_media_progress(&progress_manager, &progress_id, data);
-            } else {
-                set_media_activity_from_line(&progress_manager, &progress_id, &line);
-            }
+        consume_process_output(stderr, |line| {
+            update_media_progress_from_line(&progress_manager, &progress_id, &line);
             captured.push_str(&line);
             captured.push('\n');
             if captured.len() > 16_000 {
@@ -2234,7 +2498,7 @@ async fn run_media_download(
                     .map(|(index, _)| index).unwrap_or(captured.len());
                 captured.drain(..cut);
             }
-        }
+        }).await;
         captured
     });
 
@@ -2259,6 +2523,7 @@ async fn run_media_download(
         match output {
             Some(path) if path.is_file() => {
                 set_file_path(manager, id, &path);
+                let _ = fs::remove_dir_all(job_work_dir(id)).await;
                 Ok(())
             }
             Some(path) => Err(format!("yt-dlp reported a result, but the output file was not found: {}", path.display())),
@@ -2576,7 +2841,7 @@ fn find_tool(app: &AppHandle, name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod lite_mode_tests {
-    use super::{cleanup_cancelled_files, download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, unique_path, DownloadManager, DownloadRecord};
+    use super::{cleanup_cancelled_files, download_http, effective_segment_count, needs_media_extractor, parse_content_range_start, partial_bytes_for, persist_records, update_media_progress, unique_path, DownloadManager, DownloadRecord};
     use reqwest::{header, Client};
     use std::{io::{Read, Write}, net::TcpListener, path::PathBuf, sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc}, time::Instant};
     use tokio_util::sync::CancellationToken;
@@ -2638,7 +2903,8 @@ mod lite_mode_tests {
         assert_eq!(super::normalize_download_kind("file"), "file");
         assert_eq!(super::normalize_download_kind("audio"), "audio");
         assert_eq!(super::normalize_download_kind("video"), "auto");
-        assert_eq!(super::normalize_download_kind("video-only"), "auto");
+        assert_eq!(super::normalize_download_kind("video-only"), "video-only");
+        assert_eq!(super::selected_media_format("video-only", None, true).unwrap(), "bestvideo");
         assert_eq!(super::normalize_download_kind("unknown"), "auto");
     }
 
@@ -2735,6 +3001,7 @@ mod lite_mode_tests {
             error: None,
             cancel: CancellationToken::new(),
             progress_override: None,
+            speed_bytes_sec: 0,
             concurrency: 2,
             etag: None,
             last_modified: None,
@@ -2745,6 +3012,67 @@ mod lite_mode_tests {
             media_activity: None,
             cancel_requested: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    #[test]
+    fn yt_dlp_progress_updates_the_queue_speed_in_bytes_per_second() {
+        let manager = DownloadManager::default();
+        let mut record = queued_record("speed-job");
+        record.status = "Extracting media".into();
+        manager.records.lock().expect("lock queue")
+            .insert(record.id.clone(), record);
+
+        update_media_progress(&manager, "speed-job", "4096|16384|16384|1536.75");
+
+        let records = manager.records.lock().expect("lock queue");
+        let updated = records.get("speed-job").expect("speed job");
+        assert_eq!(updated.downloaded.load(Ordering::Relaxed), 4096);
+        assert_eq!(updated.total, Some(16384));
+        assert_eq!(updated.speed_bytes_sec, 1537);
+        assert_eq!(updated.status, "Downloading");
+        assert_eq!(updated.media_activity.as_deref(), Some("Downloading media"));
+    }
+
+    #[test]
+    fn parses_standard_yt_dlp_progress_lines_for_desktop_live_updates() {
+        let parsed = super::parse_yt_dlp_progress_line(
+            "[download]  25.0% of 100.00MiB at 2.50MiB/s ETA 00:30"
+        ).expect("parse a standard yt-dlp progress line");
+        assert_eq!(parsed.0, Some(25 * 1024 * 1024));
+        assert_eq!(parsed.1, Some(100 * 1024 * 1024));
+        assert_eq!(parsed.2, Some(2_621_440));
+
+        let final_line = super::parse_yt_dlp_progress_line(
+            "[download] 100% of 1.00MB in 00:01 at 1.00MB/s"
+        ).expect("parse a final yt-dlp progress line");
+        assert_eq!(final_line.0, Some(1_000_000));
+        assert_eq!(final_line.1, Some(1_000_000));
+        assert_eq!(final_line.2, Some(1_000_000));
+    }
+
+    #[test]
+    fn parses_aria2_progress_lines_for_live_media_cards() {
+        let parsed = super::parse_aria2_progress_line(
+            "[#8fcbad 1.7MiB/81MiB(2%) CN:16 DL:1.25MiB ETA:1m]"
+        ).expect("parse aria2 progress");
+        assert_eq!(parsed.0, Some((1.7 * 1024.0 * 1024.0) as u64));
+        assert_eq!(parsed.1, Some(81 * 1024 * 1024));
+        assert_eq!(parsed.2, Some((1.25 * 1024.0 * 1024.0) as u64));
+    }
+
+    #[test]
+    fn live_media_speed_uses_current_rate_not_lifetime_average() {
+        let mut record = queued_record("live-media-speed");
+        record.status = "Downloading".into();
+        record.started = Instant::now() - std::time::Duration::from_secs(10);
+        record.downloaded.store(20_000_000, Ordering::Relaxed);
+        record.media_activity = Some("Downloading media".into());
+        record.speed_bytes_sec = 1_000;
+
+        assert_eq!(super::view_of(&record).speed_bytes_sec, 1_000);
+
+        record.speed_bytes_sec = 0;
+        assert_eq!(super::view_of(&record).speed_bytes_sec, 0);
     }
 
     #[test]
@@ -2816,9 +3144,11 @@ mod lite_mode_tests {
         let manager = DownloadManager::default();
         manager.restore_queue(queue_file.clone());
         let mut interrupted = queued_record("interrupted-job");
+        interrupted.url = "https://example.com/interrupted-file.zip".into();
         interrupted.status = "Downloading".into();
         interrupted.destination = folder.display().to_string();
         let mut manual_pause = queued_record("manual-pause-job");
+        manual_pause.url = "https://example.com/manual-pause-file.zip".into();
         manual_pause.status = "Paused".into();
         manager.records.lock().expect("lock original queue").extend([
             (interrupted.id.clone(), interrupted),
@@ -2836,6 +3166,38 @@ mod lite_mode_tests {
         assert_eq!(records.get("manual-pause-job").unwrap().status, "Paused");
         drop(records);
         std::fs::remove_dir_all(folder).expect("remove auto-resume directory");
+    }
+
+    #[test]
+    fn interrupted_media_with_a_final_output_is_restored_as_completed_not_resumed() {
+        let folder = std::env::temp_dir().join(format!("downbest-final-restore-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).expect("create final output recovery folder");
+        let queue_file = folder.join("queue.json");
+        let id = "abcdef1234567890";
+        let final_file = folder.join("Finished clip [video123] - abcdef12.mp4");
+        std::fs::write(&final_file, b"complete video bytes").expect("write final output");
+
+        let original = DownloadManager::default();
+        original.restore_queue(queue_file.clone());
+        let mut interrupted = queued_record(id);
+        interrupted.url = "https://www.youtube.com/watch?v=video123".into();
+        interrupted.status = "Downloading".into();
+        interrupted.destination = folder.display().to_string();
+        original.records.lock().expect("lock original queue")
+            .insert(id.to_string(), interrupted);
+        persist_records(&original);
+
+        let reopened = DownloadManager::default();
+        let auto_resume = reopened.restore_queue(queue_file);
+        assert!(auto_resume.is_empty(), "a final output must never be auto-resumed");
+        let records = reopened.records.lock().expect("lock restored queue");
+        let restored = records.get(id).expect("restored completed media item");
+        assert_eq!(restored.status, "Completed");
+        assert_eq!(restored.file_path.as_deref(), Some(final_file.to_string_lossy().as_ref()));
+        assert_eq!(restored.downloaded.load(Ordering::Relaxed), b"complete video bytes".len() as u64);
+        assert_eq!(restored.progress_override, Some(100.0));
+        drop(records);
+        std::fs::remove_dir_all(folder).expect("remove final output recovery folder");
     }
 
     #[test]
@@ -3115,31 +3477,18 @@ mod lite_mode_tests {
     }
 
     #[test]
-    fn lite_mode_uses_one_stream_for_small_files() {
-        assert_eq!(effective_segment_count(15 * 1024 * 1024, 2), 1);
+    fn small_files_use_one_stream_and_medium_files_scale_up() {
+        assert_eq!(effective_segment_count(7 * 1024 * 1024, 16), 1);
+        assert_eq!(effective_segment_count(8 * 1024 * 1024, 2), 2);
+        assert_eq!(effective_segment_count(16 * 1024 * 1024, 4), 4);
     }
 
     #[test]
-    fn lite_mode_caps_large_downloads_at_two_segments() {
-        assert_eq!(effective_segment_count(16 * 1024 * 1024, 2), 2);
-        assert_eq!(effective_segment_count(128 * 1024 * 1024, 2), 2);
-    }
-
-    #[test]
-    fn balanced_and_high_modes_respect_requested_limits() {
+    fn parallel_ranges_respect_user_connection_limits() {
         assert_eq!(effective_segment_count(32 * 1024 * 1024, 4), 4);
         assert_eq!(effective_segment_count(64 * 1024 * 1024, 8), 8);
-        assert_eq!(effective_segment_count(64 * 1024 * 1024, 32), 8);
-    }
-
-    #[test]
-    fn turbo_profile_can_use_sixteen_parallel_ranges_on_large_files() {
+        assert_eq!(effective_segment_count(64 * 1024 * 1024, 32), 16);
         assert_eq!(effective_segment_count(256 * 1024 * 1024, 16), 16);
-        assert_eq!(effective_segment_count(256 * 1024 * 1024, 32), 16);
-    }
-
-    #[test]
-    fn lite_profile_stays_at_two_connections_for_large_files() {
         assert_eq!(effective_segment_count(256 * 1024 * 1024, 2), 2);
     }
 }
