@@ -315,11 +315,11 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
             val runnerFile = File(root, "downbest_ytdlp_runner.py")
             val runnerVersion = File(root, ".runner-version")
             if (!runnerFile.isFile || !runnerVersion.isFile ||
-                runnerVersion.readText() != "3") {
+                runnerVersion.readText() != "4") {
                 activity.assets.open("downbest_ytdlp_runner.py").buffered().use { input ->
                     runnerFile.outputStream().buffered().use { output -> input.copyTo(output, 64 * 1024) }
                 }
-                runnerVersion.writeText("3")
+                runnerVersion.writeText("4")
             }
 
             // Python 3.13 Android wheels are ABI-specific. If the wheel assets are
