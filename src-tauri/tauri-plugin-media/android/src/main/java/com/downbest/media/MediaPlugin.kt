@@ -18,12 +18,14 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import dev.ffmpegkit_maintained.ytdlp.DownloadProgressCallback
 import dev.ffmpegkit_maintained.ytdlp.YtDlp
-import dev.ffmpegkit_maintained.ytdlp.YtDlpRequest
 import com.arthenica.ffmpegkit.FFmpegKit
 import com.arthenica.ffmpegkit.ReturnCode
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Future
+import java.util.concurrent.Executors
+import java.util.zip.ZipInputStream
 import java.util.concurrent.TimeUnit
 
 @InvokeArg
@@ -67,6 +69,9 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private val activeDownloads = ConcurrentHashMap<String, Future<*>>()
+    private val mediaExecutor = Executors.newCachedThreadPool()
+    private val pythonRuntimeLock = Any()
+    @Volatile private var pythonRunnerReady = false
     private val jobGenerations = ConcurrentHashMap<String, Long>()
     private val cancelledGenerations = ConcurrentHashMap<String, Long>()
 
@@ -271,6 +276,113 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    private fun extractWheelAsset(assetName: String, destination: File) {
+        val root = destination.canonicalFile
+        ZipInputStream(activity.assets.open("python-wheels/$assetName").buffered()).use { zip ->
+            var entry = zip.nextEntry
+            while (entry != null) {
+                val target = File(root, entry.name).canonicalFile
+                require(target.path.startsWith(root.path + File.separator) || target == root) {
+                    "The bundled Python wheel contains an invalid path."
+                }
+                if (entry.isDirectory) {
+                    if (!target.exists() && !target.mkdirs()) {
+                        throw IllegalStateException("Could not create a Python package directory.")
+                    }
+                } else {
+                    target.parentFile?.let { if (!it.exists() && !it.mkdirs()) {
+                        throw IllegalStateException("Could not create a Python package folder.")
+                    } }
+                    FileOutputStream(target).use { output -> zip.copyTo(output, 128 * 1024) }
+                }
+                zip.closeEntry()
+                entry = zip.nextEntry
+            }
+        }
+    }
+
+    private fun preparePythonRunner() {
+        ensureYtDlpInitialized()
+        if (pythonRunnerReady) return
+        synchronized(pythonRuntimeLock) {
+            if (pythonRunnerReady) return
+            val root = File(activity.filesDir, "downbest-python")
+            val sitePackages = File(root, "site-packages")
+            if (!sitePackages.exists() && !sitePackages.mkdirs()) {
+                throw IllegalStateException("Could not prepare the Android Python runtime.")
+            }
+
+            val runnerFile = File(root, "downbest_ytdlp_runner.py")
+            val runnerVersion = File(root, ".runner-version")
+            if (!runnerFile.isFile || !runnerVersion.isFile ||
+                runnerVersion.readText() != "2") {
+                activity.assets.open("downbest_ytdlp_runner.py").buffered().use { input ->
+                    runnerFile.outputStream().buffered().use { output -> input.copyTo(output, 64 * 1024) }
+                }
+                runnerVersion.writeText("2")
+            }
+
+            // Python 3.13 Android wheels are ABI-specific. If the wheel assets are
+            // unavailable (e.g. a local developer build), yt-dlp still runs using
+            // its standard networking stack.
+            val abi = Build.SUPPORTED_ABIS.firstOrNull {
+                it == "arm64-v8a" || it == "x86_64"
+            }
+            if (abi != null) {
+                val platform = if (abi == "arm64-v8a") "android_24_arm64_v8a" else "android_24_x86_64"
+                val wheelNames = try {
+                    activity.assets.list("python-wheels")?.toList().orEmpty()
+                } catch (_: Exception) {
+                    emptyList()
+                }
+                val selectedWheels = wheelNames.filter { name ->
+                    (name.startsWith("curl_cffi-0.16.3") ||
+                        name.startsWith("cffi-2.1.1")) && name.endsWith("$platform.whl") ||
+                        name.startsWith("pycparser-") && name.endsWith(".whl")
+                }
+                val marker = File(sitePackages, ".downbest-curl-cffi-0.16.3-$abi")
+                val expected = if (selectedWheels.any { it.startsWith("curl_cffi-") } &&
+                    selectedWheels.any { it.startsWith("cffi-") } &&
+                    selectedWheels.any { it.startsWith("pycparser-") }) selectedWheels else emptyList()
+                if (expected.isNotEmpty() && !marker.isFile) {
+                    expected.forEach { extractWheelAsset(it, sitePackages) }
+                    marker.writeText("installed")
+                }
+            }
+
+            val pythonClass = Class.forName("com.chaquo.python.Python")
+            val pyObjectClass = Class.forName("com.chaquo.python.PyObject")
+            val python = pythonClass.getMethod("getInstance").invoke(null)
+            val getModule = pythonClass.getMethod("getModule", String::class.java)
+            val getAttribute = pyObjectClass.getMethod("get", Any::class.java)
+            val callAttribute = pyObjectClass.getMethod(
+                "callAttr", String::class.java, Array<Any>::class.java
+            )
+            val sys = getModule.invoke(python, "sys")
+            val pythonPath = getAttribute.invoke(sys, "path")
+            callAttribute.invoke(pythonPath, "insert", arrayOf<Any>(0, sitePackages.absolutePath))
+            callAttribute.invoke(pythonPath, "insert", arrayOf<Any>(0, root.absolutePath))
+            // Import once now so missing runtime or Python module errors surface
+            // during Inspect/Download instead of becoming a silent empty response.
+            getModule.invoke(python, "downbest_ytdlp_runner")
+            pythonRunnerReady = true
+        }
+    }
+
+    private fun pythonRunnerCall(function: String, vararg args: Any): String {
+        preparePythonRunner()
+        val pythonClass = Class.forName("com.chaquo.python.Python")
+        val pyObjectClass = Class.forName("com.chaquo.python.PyObject")
+        val python = pythonClass.getMethod("getInstance").invoke(null)
+        val module = pythonClass.getMethod("getModule", String::class.java)
+            .invoke(python, "downbest_ytdlp_runner")
+        val callAttribute = pyObjectClass.getMethod(
+            "callAttr", String::class.java, Array<Any>::class.java
+        )
+        val result = callAttribute.invoke(module, function, args)
+        return result?.toString().orEmpty()
+    }
+
     private fun javascriptRuntimePath(): String? {
         val abi = Build.SUPPORTED_ABIS.firstOrNull { it == "arm64-v8a" || it == "x86_64" }
             ?: return null
@@ -308,29 +420,21 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 require(args.url.startsWith("https://") || args.url.startsWith("http://")) {
                     "Only HTTP and HTTPS media links are supported."
                 }
-                ensureYtDlpInitialized()
-                val request = YtDlpRequest(args.url)
-                    .addOption("--dump-single-json")
-                    .addOption("--skip-download")
-                    .addOption("--no-warnings")
-                    .addOption("--no-progress")
-                    .addOption("--no-colors")
-                    .addOption("--no-call-home")
-                    .addOption("--socket-timeout", "20")
-                    .addOption("--retries", "2")
-                if (args.flatPlaylist) request.addOption("--flat-playlist")
-                else request.addOption("--no-playlist")
-                val runtimeAvailable = addJavascriptRuntime(request)
-                addYouTubeClientFallbacks(request, args.url)
-                val response = YtDlp.executeAsync(request, DownloadProgressCallback { _, _, _ -> }).get(180, TimeUnit.SECONDS)
-                val result = JSObject()
-                result.put("output", response.output ?: "")
-                result.put("errorOutput", response.errorOutput ?: "")
-                result.put("exitCode", response.exitCode)
-                if (!response.isSuccess && !runtimeAvailable) {
-                    result.put("errorOutput",
-                        (response.errorOutput ?: "") + "\nDownBest QuickJS runtime was not found in this APK.")
+                val runtimePath = javascriptRuntimePath() ?: ""
+                val output = pythonRunnerCall(
+                    "inspect",
+                    args.url,
+                    args.flatPlaylist,
+                    "",
+                    runtimePath
+                )
+                require(output.isNotBlank()) {
+                    "The Android media extractor returned empty metadata. Please update DownBest and retry."
                 }
+                val result = JSObject()
+                result.put("output", output)
+                result.put("errorOutput", "")
+                result.put("exitCode", 0)
                 invoke.resolve(result)
             } catch (error: Exception) {
                 val message = error.cause?.message ?: error.message ?: "Could not inspect this media link."
@@ -372,30 +476,13 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 ensureYtDlpInitialized()
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
                 val template = File(folder, "%(title).180B [%(id)s] - ${args.jobId}.%(ext)s").absolutePath
-                val request = YtDlpRequest(args.url)
-                    .setOutputTemplate(template)
-                    .addOption("--no-playlist")
-                    .addOption("--newline")
-                    .addOption("--continue")
-                    .addOption("--part")
-                    .addOption("--socket-timeout", "20")
-                    .addOption("--retries", "4")
-                    .addOption("--fragment-retries", "4")
-                    .addOption("--extractor-retries", "2")
-                    .addOption("--file-access-retries", "2")
-                    .addOption("--concurrent-fragments", args.concurrency.coerceIn(1, 16).toString())
-                    .addOption("--buffer-size", "1M")
-                    .addOption("--print", "after_move:__DOWNBEST_FILE__%(filepath)s")
-
-                addJavascriptRuntime(request)
-                addYouTubeClientFallbacks(request, args.url)
-                if (!args.cookiesFile.isNullOrBlank()) {
+                val cookiePath = if (!args.cookiesFile.isNullOrBlank()) {
                     val cookieFile = File(args.cookiesFile!!)
                     require(cookieFile.isFile && cookieFile.canRead()) {
                         "The imported cookies.txt file is no longer accessible. Import it again and retry."
                     }
-                    request.addOption("--cookies", cookieFile.absolutePath)
-                }
+                    cookieFile.absolutePath
+                } else ""
 
                 val selector = args.formatSelector
                 val exactFormat = selector?.takeIf { it.startsWith("format-") }
@@ -417,7 +504,7 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 var lastProgressBytes = 0L
                 var lastProgressAtNanos = System.nanoTime()
                 var smoothedSpeedBytesPerSecond = 0L
-                val future = YtDlp.executeAsync(request, DownloadProgressCallback { progress, eta, line ->
+                val progressCallback = DownloadProgressCallback { progress, eta, line ->
                     val progressLine = line ?: ""
                     val payload = JSObject()
                     payload.put("progress", progress.toDouble())
@@ -471,7 +558,21 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     } catch (_: Exception) {
                         // A closed progress channel must not abort the transfer.
                     }
-                })
+                }
+                val future = mediaExecutor.submit<String> {
+                    if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
+                    val runtimePath = javascriptRuntimePath() ?: ""
+                    pythonRunnerCall(
+                        "download",
+                        args.url,
+                        template,
+                        selectedFormat,
+                        args.concurrency.coerceIn(1, 16),
+                        cookiePath,
+                        runtimePath,
+                        progressCallback
+                    )
+                }
                 val alreadyRunning = activeDownloads.putIfAbsent(args.jobId, future)
                 if (alreadyRunning != null) {
                     future.cancel(true)
@@ -488,23 +589,14 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                     activeDownloads.remove(args.jobId, future)
                 }
                 if (isCancelled(args.jobId, generation)) throw InterruptedException("Download cancelled.")
-                if (!response.isSuccess) {
-                    val diagnostics = listOf(response.errorOutput ?: "", response.output ?: "")
-                        .filter { it.isNotBlank() }
-                        .joinToString("\n")
-                        .takeLast(1800)
+                if (response != "OK") {
                     throw IllegalStateException(
-                        "yt-dlp failed with exit code ${response.exitCode}. " +
-                            if (diagnostics.isNotBlank()) diagnostics
-                            else "The source may require sign-in or block this Android downloader."
+                        response.takeLast(1800).ifBlank { "The Android media extractor did not complete the download." }
                     )
                 }
 
                 val jobMarker = " - ${args.jobId}."
-                val printedPath = Regex("(?m)^__DOWNBEST_FILE__(.+)$")
-                    .find(response.output ?: "")?.groupValues?.get(1)?.trim()
-                val printedFile = printedPath?.takeIf { it.isNotEmpty() }?.let(::File)?.takeIf { it.isFile }
-                val downloaded = printedFile ?: folder.listFiles()
+                val downloaded = folder.listFiles()
                     ?.filter { it.isFile && it.name.contains(jobMarker) && !isExtractorTemporaryFile(it.name) }
                     ?.maxByOrNull { it.lastModified() }
                     ?: throw IllegalStateException("The extractor finished but no final output file was found for this job.")
