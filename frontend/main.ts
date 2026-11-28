@@ -606,8 +606,16 @@ async function autoProcessPastedLinks() {
         error.hidden = false;
         const rawError = mediaErrors.join(" · ");
         const denied = /(?:HTTP(?: Error)? 403|403 Forbidden)/i.test(rawError);
+        const details = rawError
+          .replace(/^[^:]{1,100}:\\s*/, "")
+          .replace(/^(?:Error|Exception):\\s*/i, "")
+          .replace(/\\s+/g, " ")
+          .trim()
+          .slice(0, 420);
         document.querySelector<HTMLElement>("#media-title")!.textContent = "Unavailable";
-            error.textContent = denied ? "HTTP 403 · Source refused the request." : "Could not analyze this media link.";
+        error.textContent = denied
+          ? `HTTP 403 · Source refused the request. ${details}`
+          : `Analysis failed · ${details || "Android did not return an error detail."}`;
       } else {
         section.hidden = true;
         error.hidden = true;
