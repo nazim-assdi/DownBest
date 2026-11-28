@@ -207,7 +207,7 @@ jobs:
           # DownBest Android media runtime is built for ARM64 only.
           # Remove any unexpected non-ARM64 outputs before signing.
           find "$apk_dir" -type f -name '*-unsigned.apk' \
-            \( ! -path '*/arm64-v8a/*' \) -delete
+            \( ! -path '*/arm64/*' \) -delete
           mapfile -t unsigned_apks < <(find "$apk_dir" -type f -name '*-unsigned.apk' -print | sort)
           if [ "${#unsigned_apks[@]}" -eq 0 ]; then
             echo "No unsigned APKs were produced." >&2
