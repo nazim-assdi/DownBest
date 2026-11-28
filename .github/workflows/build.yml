@@ -190,7 +190,7 @@ jobs:
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
       - name: Build ARM64 APK
-        run: npm run tauri android build -- --apk --split-per-abi
+        run: npm run tauri android build -- --apk --split-per-abi --target aarch64
       - name: Sign and validate Android APKs
         shell: bash
         env:
