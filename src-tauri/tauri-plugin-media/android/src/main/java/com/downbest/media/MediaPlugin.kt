@@ -603,7 +603,10 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 }?.forEach { it.delete() }
                 // Android has no desktop ffmpeg executable. The bundled LGPL
                 // FFmpegKit converts audio-only downloads into a portable M4A.
-                if (args.kind == "audio") {
+                if (args.kind == "audio" && downloaded.extension.equals("m4a", ignoreCase = true)) {
+                    // yt-dlp may already select M4A/AAC. Never transcode a file onto itself.
+                    output = downloaded
+                } else if (args.kind == "audio") {
                     val m4a = File(downloaded.parentFile, downloaded.nameWithoutExtension + ".m4a")
                     val command = "-y -i ${shellQuote(downloaded.absolutePath)} -vn -c:a aac -b:a 192k -threads 2 ${shellQuote(m4a.absolutePath)}"
                     val session = FFmpegKit.execute(command)
