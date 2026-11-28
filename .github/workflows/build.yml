@@ -245,6 +245,32 @@ jobs:
             chmod 755 "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
             file "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
           done
+      - name: Prepare Android browser TLS wheels (curl-cffi)
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheel_dir="src-tauri/tauri-plugin-media/android/src/main/assets/python-wheels"
+          mkdir -p "$wheel_dir"
+          for platform in android_24_arm64_v8a android_24_x86_64; do
+            python -m pip download \
+              --disable-pip-version-check \
+              --only-binary=:all: --no-deps \
+              --extra-index-url "https://pypi.flet.dev" \
+              --dest "$wheel_dir" \
+              --platform "$platform" \
+              --python-version 3.13 --implementation cp --abi cp313 \
+              "curl-cffi==0.16.3" "cffi==2.1.1"
+          done
+          python -m pip download \
+            --disable-pip-version-check \
+            --only-binary=:all: --no-deps \
+            --dest "$wheel_dir" "pycparser==2.23"
+          ls -lh "$wheel_dir"
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'curl_cffi-0.16.3*android_24_arm64_v8a.whl' | wc -l)" -eq 1
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'curl_cffi-0.16.3*android_24_x86_64.whl' | wc -l)" -eq 1
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'cffi-2.1.1*android_24_arm64_v8a.whl' | wc -l)" -eq 1
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'cffi-2.1.1*android_24_x86_64.whl' | wc -l)" -eq 1
+          test "$(find "$wheel_dir" -maxdepth 1 -name 'pycparser-*.whl' | wc -l)" -eq 1
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
       - name: Build APKs
