@@ -497,6 +497,9 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 var lastProgressAtNanos = System.nanoTime()
                 var smoothedSpeedBytesPerSecond = 0L
                 val progressCallback = DownloadProgressCallback { progress, eta, line ->
+                    if (isCancelled(args.jobId, generation) || Thread.currentThread().isInterrupted) {
+                        throw InterruptedException("Download cancelled.")
+                    }
                     val progressLine = line ?: ""
                     val payload = JSObject()
                     payload.put("progress", progress.toDouble())
@@ -623,7 +626,19 @@ class MediaPlugin(private val activity: Activity) : Plugin(activity) {
                 result.put("format", args.kind)
                 invoke.resolve(result)
             } catch (error: Exception) {
-                invoke.reject(error.message ?: "Mobile media download failed.")
+                val wasCancelled = isCancelled(args.jobId, generation) ||
+                    error is java.util.concurrent.CancellationException ||
+                    Thread.currentThread().isInterrupted
+                if (wasCancelled) {
+                    invoke.reject("Download cancelled.")
+                } else {
+                    var root = error as Throwable
+                    val visited = HashSet<Throwable>()
+                    while (root.cause != null && root.cause !== root && visited.add(root)) {
+                        root = root.cause!!
+                    }
+                    invoke.reject(root.message?.takeIf { it.isNotBlank() } ?: root.toString())
+                }
             } finally {
                 cancelledGenerations.remove(args.jobId, generation)
             }
