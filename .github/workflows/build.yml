@@ -89,7 +89,7 @@ jobs:
           packages: platform-tools
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,x86_64-linux-android
+          targets: aarch64-linux-android
       - name: Install Android SDK packages
         run: |
           sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.2.12479018"
@@ -117,8 +117,14 @@ jobs:
                   "android {\n    packaging { jniLibs { useLegacyPackaging = true } }\n",
                   1
               )
+          if "abiFilters" not in content:
+              match = re.search(r"(?m)^(\s*defaultConfig\s*\{)", content)
+              if not match:
+                  raise SystemExit("Could not find defaultConfig in build.gradle.kts")
+              pos = match.end()
+              content = content[:pos] + '\n        ndk { abiFilters += listOf("arm64-v8a") }' + content[pos:]
           gradle.write_text(content)
-          print("Android compileSdk/targetSdk API 36; JNI legacy packaging enabled; ABIs: arm64-v8a, x86_64")
+          print("Android compileSdk/targetSdk API 36; JNI legacy packaging enabled; ABI: arm64-v8a")
           PY
       - name: Prepare Android JavaScript runtime (QuickJS)
         shell: bash
@@ -131,11 +137,11 @@ jobs:
           ndk="$ANDROID_HOME/ndk/27.2.12479018"
           toolchain="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
           source_dir="$RUNNER_TEMP/quickjs-ng"
-          for abi in arm64-v8a x86_64; do
+          for abi in arm64-v8a; do
             build="$RUNNER_TEMP/quickjs-build-$abi"
             case "$abi" in
               arm64-v8a) triple="aarch64-linux-android" ;;
-              x86_64) triple="x86_64-linux-android" ;;
+  
             esac
             cc="$toolchain/${triple}24-clang"
             cmake -S "$source_dir" -B "$build" \
@@ -148,9 +154,7 @@ jobs:
             test -x "$qjs_bin"
             if [[ "$abi" == "arm64-v8a" ]]; then
               "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*AArch64"
-            else
-              "$toolchain/llvm-readelf" -h "$qjs_bin" | grep -q "Machine:.*X86-64"
-            fi
+
             mkdir -p "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi"
             cp "$qjs_bin" "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
             chmod 755 "src-tauri/tauri-plugin-media/android/src/main/jniLibs/$abi/libqjs.so"
@@ -162,7 +166,7 @@ jobs:
           set -euo pipefail
           wheel_dir="src-tauri/tauri-plugin-media/android/src/main/assets/python-wheels"
           mkdir -p "$wheel_dir"
-          for platform in android_24_arm64_v8a android_24_x86_64; do
+          for platform in android_24_arm64_v8a; do
             python -m pip download \
               --disable-pip-version-check \
               --only-binary=:all: --no-deps \
@@ -178,13 +182,11 @@ jobs:
             --dest "$wheel_dir" "pycparser==2.23"
           ls -lh "$wheel_dir"
           test "$(find "$wheel_dir" -maxdepth 1 -name 'curl_cffi-0.16.3*android_24_arm64_v8a.whl' | wc -l)" -eq 1
-          test "$(find "$wheel_dir" -maxdepth 1 -name 'curl_cffi-0.16.3*android_24_x86_64.whl' | wc -l)" -eq 1
           test "$(find "$wheel_dir" -maxdepth 1 -name 'cffi-2.1.1*android_24_arm64_v8a.whl' | wc -l)" -eq 1
-          test "$(find "$wheel_dir" -maxdepth 1 -name 'cffi-2.1.1*android_24_x86_64.whl' | wc -l)" -eq 1
           test "$(find "$wheel_dir" -maxdepth 1 -name 'pycparser-*.whl' | wc -l)" -eq 1
       - name: Generate app icons
         run: npm run tauri icon app-icon.svg
-      - name: Build APKs
+      - name: Build ARM64 APK
         run: npm run tauri android build -- --apk --split-per-abi
       - name: Sign and validate Android APKs
         shell: bash
@@ -199,10 +201,10 @@ jobs:
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           keystore="$RUNNER_TEMP/downbest-signing.keystore"
 
-          # The embedded yt-dlp runtime is distributed for 64-bit Android only.
-          # Tauri may still emit 32-bit split APKs; do not sign or publish them.
+          # DownBest Android media runtime is built for ARM64 only.
+          # Remove any unexpected non-ARM64 outputs before signing.
           find "$apk_dir" -type f -name '*-unsigned.apk' \
-            \( -path '*/arm/*' -o -path '*/x86/*' \) -delete
+            \( ! -path '*/arm64-v8a/*' \) -delete
           mapfile -t unsigned_apks < <(find "$apk_dir" -type f -name '*-unsigned.apk' -print | sort)
           if [ "${#unsigned_apks[@]}" -eq 0 ]; then
             echo "No unsigned APKs were produced." >&2
@@ -260,11 +262,11 @@ jobs:
 
             abi_dir="${unsigned_apk#"$apk_dir"/}"
             abi_dir="${abi_dir%%/*}"
-            case "$abi_dir" in
-              arm64) native_abi="arm64-v8a" ;;
-              x86_64) native_abi="x86_64" ;;
-              *) echo "Unexpected APK ABI folder: $abi_dir" >&2; exit 1 ;;
-            esac
+            if [[ "$abi_dir" != "arm64-v8a" && "$abi_dir" != "arm64" ]]; then
+              echo "Unexpected non-ARM64 APK folder: $abi_dir" >&2
+              exit 1
+            fi
+            native_abi="arm64-v8a"
             unzip -Z1 "$signed_apk" | grep -qx "lib/$native_abi/libdownbest_lib.so" || {
               echo "Expected $native_abi native library is missing from $signed_apk" >&2
               exit 1
